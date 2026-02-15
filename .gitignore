@@ -1,0 +1,44 @@
+# --- Binary Overworld ---
+# Compiled delectables (the actual executable)
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# If you name your binary specifically (like 'gopherus' or 'vindex')
+# add that specific name here:
+# /my_assistant_binary
+
+# --- The Forge (Build Artifacts) ---
+# Output of go build
+bin/
+obj/
+
+# --- Scroll of Secrets (Environment/Local) ---
+# Never commit your secrets to the Senate
+.env
+*.local
+auth.json
+
+# --- Scribe Tools (IDEs) ---
+# Visual Studio Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# JetBrains / GoLand
+.idea/
+
+# --- Testing & Rites ---
+# Test coverage files
+*.out
+*.test
+coverage.txt
+
+# --- Dependency Management ---
+# Only ignore vendor/ if you aren't "vendoring" your code. 
+# Most modern Go projects (using Go Modules) keep this ignored.
+vendor/

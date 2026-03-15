@@ -27,6 +27,9 @@ func (m Model) View() string {
 	case stateBrewLogs:
 		return m.renderLogs()
 
+	case stateUnstaged:
+		return m.renderUnstaged()
+
 	case stateBrewMenu:
 		return m.brewList.View()
 
@@ -101,6 +104,56 @@ func renderLogTable(entries []db.UpgradeLog) string {
 			date,
 		))
 	}
+	return sb.String()
+}
+
+// renderUnstaged renders the list of packages installed but absent from the
+// Brewfile, with per-package checkbox selection.
+func (m Model) renderUnstaged() string {
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  Unstaged Packages"))
+	sb.WriteString("\n\n")
+
+	if len(m.unstagedPackages) == 0 {
+		sb.WriteString("  ✓ No packages found outside your Brewfile.\n")
+		sb.WriteString("\n")
+		sb.WriteString(helpStyle.Render("  q / esc  back"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	selectedCount := len(m.unstagedSelected)
+	sb.WriteString(warningStyle.Render(fmt.Sprintf(
+		"  %d package(s) installed but not in Brewfile (%d selected):",
+		len(m.unstagedPackages), selectedCount,
+	)))
+	sb.WriteString("\n\n")
+
+	// Column header
+	sb.WriteString(fmt.Sprintf("  %-4s  %-10s  %s\n", "", "TYPE", "PACKAGE"))
+	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 50)) + "\n")
+
+	for i, p := range m.unstagedPackages {
+		checked := "[ ]"
+		if m.unstagedSelected[i] {
+			checked = "[✓]"
+		}
+		row := fmt.Sprintf("  %-4s  %-10s  %s", checked, "["+p.Kind+"]", p.Name)
+		if i == m.unstagedCursor {
+			row = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(lipgloss.Color("212")).
+				Render(row)
+		}
+		sb.WriteString(row + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(helpStyle.Render(
+		"  ↑/↓ or j/k navigate · space toggle · a select/deselect all · enter add selected · q back",
+	))
+	sb.WriteString("\n")
 	return sb.String()
 }
 

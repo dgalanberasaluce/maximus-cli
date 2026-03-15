@@ -60,6 +60,14 @@ func (d *DB) migrate() error {
 			upgraded_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_upgrade_log_package ON upgrade_log(package_name)`,
+		`CREATE TABLE IF NOT EXISTS package_addition_log (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			package_name TEXT NOT NULL,
+			kind         TEXT NOT NULL,
+			version      TEXT NOT NULL DEFAULT '',
+			added_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_addition_log_package ON package_addition_log(package_name)`,
 	}
 	for _, q := range queries {
 		if _, err := d.conn.Exec(q); err != nil {
@@ -211,12 +219,92 @@ func (d *DB) CountUpgradeLogs(filter string) (int, error) {
 	return count, nil
 }
 
+// AdditionLog is a single entry in the package addition log.
+type AdditionLog struct {
+	ID          int64
+	PackageName string
+	Kind        string
+	Version     string
+	AddedAt     time.Time
+}
+
+// LogAddition records that a package was added to the Brewfile from the
+// unstaged list. version may be empty if the installed version is unknown.
+func (d *DB) LogAddition(packageName, kind, version string) error {
+	_, err := d.conn.Exec(
+		`INSERT INTO package_addition_log(package_name, kind, version, added_at) VALUES (?, ?, ?, ?)`,
+		packageName, kind, version, time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("db: log addition %q: %w", packageName, err)
+	}
+	return nil
+}
+
+// GetAdditionLogs returns addition log entries with optional package filter,
+// newest first. Pass filter="" to return all. Use limit/offset for pagination.
+func (d *DB) GetAdditionLogs(filter string, limit, offset int) ([]AdditionLog, error) {
+	if limit > 100 {
+		limit = 100
+	}
+	var base string
+	var args []any
+	if filter != "" {
+		base = `SELECT id, package_name, kind, version, added_at
+			   FROM package_addition_log
+			  WHERE package_name LIKE ?
+			  ORDER BY added_at DESC LIMIT ? OFFSET ?`
+		args = []any{"%" + filter + "%", limit, offset}
+	} else {
+		base = `SELECT id, package_name, kind, version, added_at
+			   FROM package_addition_log
+			  ORDER BY added_at DESC LIMIT ? OFFSET ?`
+		args = []any{limit, offset}
+	}
+	rows, err := d.conn.Query(base, args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: get addition logs: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []AdditionLog
+	for rows.Next() {
+		var e AdditionLog
+		var ts string
+		if err := rows.Scan(&e.ID, &e.PackageName, &e.Kind, &e.Version, &ts); err != nil {
+			return nil, fmt.Errorf("db: scan addition log: %w", err)
+		}
+		e.AddedAt, _ = time.Parse(time.RFC3339, ts)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// CountAdditionLogs returns the total number of addition log entries matching filter.
+func (d *DB) CountAdditionLogs(filter string) (int, error) {
+	var count int
+	var err error
+	if filter != "" {
+		err = d.conn.QueryRow(
+			`SELECT COUNT(*) FROM package_addition_log WHERE package_name LIKE ?`,
+			"%"+filter+"%",
+		).Scan(&count)
+	} else {
+		err = d.conn.QueryRow(`SELECT COUNT(*) FROM package_addition_log`).Scan(&count)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("db: count addition logs: %w", err)
+	}
+	return count, nil
+}
+
 // Stats holds database statistics for the self-doctor.
 type Stats struct {
-	Path         string
-	SettingCount int
-	HistoryCount int
-	UpgradeCount int
+	Path          string
+	SettingCount  int
+	HistoryCount  int
+	UpgradeCount  int
+	AdditionCount int
 }
 
 // Doctor returns diagnostic information about the database.
@@ -231,6 +319,9 @@ func (d *DB) Doctor() (*Stats, error) {
 	}
 	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM upgrade_log`).Scan(&s.UpgradeCount); err != nil {
 		return nil, fmt.Errorf("db: doctor upgrade count: %w", err)
+	}
+	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM package_addition_log`).Scan(&s.AdditionCount); err != nil {
+		return nil, fmt.Errorf("db: doctor addition count: %w", err)
 	}
 	return s, nil
 }

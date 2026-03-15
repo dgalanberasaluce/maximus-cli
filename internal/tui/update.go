@@ -32,6 +32,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateResult
 		return m, nil
 
+	case unstagedMsg:
+		m.unstagedPackages = msg.packages
+		m.unstagedCursor = 0
+		// Pre-select all packages.
+		sel := make(map[int]bool, len(msg.packages))
+		for i := range msg.packages {
+			sel[i] = true
+		}
+		m.unstagedSelected = sel
+		m.state = stateUnstaged
+		return m, nil
+
 	case logsMsg:
 		m.logEntries = msg.entries
 		m.logTotal = msg.total
@@ -60,6 +72,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logInput, cmd = m.logInput.Update(msg)
 				return m, cmd
 			}
+		}
+
+		// --- Unstaged packages screen ---
+		if m.state == stateUnstaged {
+			n := len(m.unstagedPackages)
+			switch msg.String() {
+			case "up", "k":
+				if m.unstagedCursor > 0 {
+					m.unstagedCursor--
+				}
+			case "down", "j":
+				if m.unstagedCursor < n-1 {
+					m.unstagedCursor++
+				}
+			case " ":
+				// Toggle the currently highlighted package.
+				if m.unstagedSelected == nil {
+					m.unstagedSelected = make(map[int]bool)
+				}
+				m.unstagedSelected[m.unstagedCursor] = !m.unstagedSelected[m.unstagedCursor]
+			case "a":
+				// Toggle all: if all are selected, deselect all; otherwise select all.
+				allSelected := len(m.unstagedSelected) == n && n > 0
+				sel := make(map[int]bool, n)
+				if !allSelected {
+					for i := range n {
+						sel[i] = true
+					}
+				}
+				m.unstagedSelected = sel
+			case "enter":
+				// Add only the selected packages.
+				var chosen []brew.UnstagedPackage
+				for i, p := range m.unstagedPackages {
+					if m.unstagedSelected[i] {
+						chosen = append(chosen, p)
+					}
+				}
+				if len(chosen) == 0 {
+					m.state = stateBrewMenu
+					return m, nil
+				}
+				brewinfile := m.brewfile
+				database := m.database
+				m.state = stateLoading
+				m.loadingText = fmt.Sprintf("Adding %d package(s) to Brewfile...", len(chosen))
+				return m, tea.Batch(m.spinner.Tick, unstagedAddAllCmd(chosen, brewinfile, database))
+			case "esc", "q":
+				m.state = stateBrewMenu
+				return m, nil
+			}
+			return m, nil
 		}
 
 		// --- Log view navigation (input mode off) ---
@@ -237,14 +301,11 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 		m.state = stateLoading
 		m.loadingText = "Checking unstaged packages..."
 		bgCmd := func() tea.Msg {
-			out, err := brew.Unstaged(brewfile)
+			pkgs, err := brew.Unstaged(brewfile)
 			if err != nil {
 				return errMsg(err)
 			}
-			if out == "" {
-				out = "✓ No packages found outside your Brewfile."
-			}
-			return resultMsg{content: out}
+			return unstagedMsg{packages: pkgs}
 		}
 		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
@@ -281,3 +342,33 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 
 // logPageFromDB is a helper type so db is available without import cycle.
 type logPageFromDB = db.UpgradeLog
+
+// unstagedMsg carries the list of unstaged packages back to the model.
+type unstagedMsg struct {
+	packages []brew.UnstagedPackage
+}
+
+// unstagedAddAllCmd adds all packages to the Brewfile and logs them to DB.
+func unstagedAddAllCmd(pkgs []brew.UnstagedPackage, brewfilePath string, database *db.DB) tea.Cmd {
+	return func() tea.Msg {
+		if err := brew.AddPackagesToBrewfile(brewfilePath, pkgs); err != nil {
+			return errMsg(err)
+		}
+		for _, p := range pkgs {
+			// Retrieve the installed version; if unavailable, use "(unknown)".
+			version := installedVersion(p.Name)
+			_ = database.LogAddition(p.Name, p.Kind, version)
+		}
+		return resultMsg{content: fmt.Sprintf("✓ Added %d package(s) to Brewfile and logged to database.", len(pkgs))}
+	}
+}
+
+// installedVersion returns the installed version of a formula via brew info.
+// Returns "(unknown)" on any error.
+func installedVersion(name string) string {
+	out, err := brew.InfoVersion(name)
+	if err != nil || out == "" {
+		return "(unknown)"
+	}
+	return out
+}

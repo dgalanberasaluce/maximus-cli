@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -20,6 +21,7 @@ const (
 	stateLoading
 	stateResult
 	stateBrewLogs
+	stateUnstaged // interactive unstaged packages screen
 )
 
 const (
@@ -70,6 +72,11 @@ type Model struct {
 	logFilter    string  // active filter (package name substring)
 	logInput     textinput.Model
 	logInputMode bool    // whether the filter text input is active
+
+	// Unstaged packages state
+	unstagedPackages  []brew.UnstagedPackage
+	unstagedCursor    int            // index of currently highlighted row
+	unstagedSelected  map[int]bool   // selected package indices
 }
 
 // styles

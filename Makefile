@@ -1,6 +1,6 @@
 # Variables
 BINARY_NAME=bin/maximus
-MAIN_FILE=main.go
+MAIN_PKG=./cmd/maximux
 
 # ==============================================================================
 # Main Targets
@@ -9,13 +9,13 @@ MAIN_FILE=main.go
 # Default target: builds the binary
 all: build
 
-# Build the binary into the current directory
+# Build the binary into the bin/ directory (CGO_ENABLED=1 required for sqlite3)
 build:
 	@echo "  >  Building $(BINARY_NAME)..."
-	@go build -o $(BINARY_NAME) $(MAIN_FILE)
+	@CGO_ENABLED=1 go build -o $(BINARY_NAME) $(MAIN_PKG)
 	@echo "  >  Build complete!"
 
-# Run the compiled binary directly (triggers help by default)
+# Run the compiled binary directly
 exec: build
 	@./$(BINARY_NAME)
 
@@ -23,17 +23,9 @@ exec: build
 # Development / Running
 # ==============================================================================
 
-# Run 'maximus brew' using go run (no binary creation)
-run-brew:
-	@go run $(MAIN_FILE) brew
-
-# Run 'maximus help' using go run
-run-help:
-	@go run $(MAIN_FILE) help
-
-# Run with arbitrary arguments (usage: make run args="some command")
+# Run the app with go run (no binary creation)
 run:
-	@go run $(MAIN_FILE) $(args)
+	@CGO_ENABLED=1 go run $(MAIN_PKG) $(args)
 
 # ==============================================================================
 # Maintenance
@@ -50,6 +42,10 @@ tidy:
 	@go fmt ./...
 	@go mod tidy
 
+# Vet all packages
+vet:
+	@go vet ./...
+
 # ==============================================================================
 # .PHONY ensures Make doesn't confuse these targets with file names
-.PHONY: all build exec run-brew run-help run clean tidy
+.PHONY: all build exec run clean tidy vet

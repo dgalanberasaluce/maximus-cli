@@ -42,3 +42,6 @@ coverage.txt
 # Only ignore vendor/ if you aren't "vendoring" your code. 
 # Most modern Go projects (using Go Modules) keep this ignored.
 vendor/
+
+.agents
+skills-lock.json

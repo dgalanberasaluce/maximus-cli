@@ -50,6 +50,7 @@ jobs:
           
       - name: Store Binary in Golang Forgejo Package Registry
         # The user requested to store it in a golang forgejo package registry named https://forgejo.internal/oci
+        # We now take the URL from a Forgejo environment variable
         run: |
           # The package name and version for Forgejo
           OWNER="${{ github.repository_owner }}"
@@ -59,8 +60,8 @@ jobs:
           # Compress to zip as typical for Go package registries or generic deployments
           zip maximus-cli.zip maximus-cli
           
-          # Uploading to the requested registry URL
+          # Uploading to the registry URL from environment variable
           curl \
             --user "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
             --upload-file "maximus-cli.zip" \
-            "https://forgejo.internal/oci"
+            "${{ vars.FORGEJO_PACKAGE_REGISTRY_URL }}"

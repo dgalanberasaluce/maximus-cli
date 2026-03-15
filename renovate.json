@@ -1,0 +1,16 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Group Go minor and patch updates, excluding v0",
+      "matchManagers": ["gomod"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchCurrentVersion": ">= 1.0.0",
+      "groupName": "go non-major dependencies",
+      "groupSlug": "go-minor-patch"
+    }
+  ]
+}

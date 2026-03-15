@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"maximus-cli/internal/brew"
+	"maximus-cli/internal/db"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -27,28 +28,88 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case resultMsg:
-		m.result = msg.content + "\n\n(Press q or esc to go back)"
+		m.result = msg.content
 		m.state = stateResult
+		return m, nil
+
+	case logsMsg:
+		m.logEntries = msg.entries
+		m.logTotal = msg.total
+		m.state = stateBrewLogs
 		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		}
 
+		// --- Log view input mode: route keys to the text input ---
+		if m.state == stateBrewLogs && m.logInputMode {
+			switch msg.String() {
+			case "enter":
+				// Apply filter and fetch page 0.
+				m.logFilter = m.logInput.Value()
+				m.logPage = 0
+				m.logInputMode = false
+				return m, m.fetchLogs()
+			case "esc":
+				m.logInputMode = false
+				return m, nil
+			default:
+				m.logInput, cmd = m.logInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// --- Log view navigation (input mode off) ---
+		if m.state == stateBrewLogs {
+			switch msg.String() {
+			case "esc", "q":
+				// Back to brew menu.
+				m.state = stateBrewMenu
+				return m, nil
+			case "/":
+				// Enter filter input mode.
+				m.logInput.SetValue(m.logFilter)
+				m.logInput.Focus()
+				m.logInputMode = true
+				return m, nil
+			case "r":
+				// Clear filter and reload.
+				m.logFilter = ""
+				m.logInput.SetValue("")
+				m.logPage = 0
+				return m, m.fetchLogs()
+			case "n", "right":
+				// Next page (if there are more entries).
+				maxPage := (m.logTotal - 1) / logPageSize
+				if m.logPage < maxPage {
+					m.logPage++
+					return m, m.fetchLogs()
+				}
+			case "p", "left":
+				// Previous page.
+				if m.logPage > 0 {
+					m.logPage--
+					return m, m.fetchLogs()
+				}
+			}
+			return m, nil
+		}
+
+		// --- Global back / quit ---
+		switch msg.String() {
 		case "esc", "q":
 			switch m.state {
 			case stateResult:
-				// Return to the brew menu after viewing a result.
 				m.result = ""
 				m.state = stateBrewMenu
 				return m, nil
 			case stateBrewMenu:
-				// Return to main menu from brew menu.
 				m.state = stateMainMenu
 				return m, nil
 			}
-
 		case "enter":
 			switch m.state {
 			case stateMainMenu:
@@ -59,7 +120,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				}
-
 			case stateBrewMenu:
 				if i, ok := m.brewList.SelectedItem().(menuItem); ok {
 					return m.dispatchBrewCmd(i.title)
@@ -68,7 +128,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Delegate navigation updates to the active list.
+	// Delegate navigation updates to the active list/component.
 	switch m.state {
 	case stateMainMenu:
 		m.mainList, cmd = m.mainList.Update(msg)
@@ -84,56 +144,99 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// fetchLogs returns a Cmd that queries the DB for the current log page.
+func (m Model) fetchLogs() tea.Cmd {
+	database := m.database
+	filter := m.logFilter
+	page := m.logPage
+	return func() tea.Msg {
+		total, err := database.CountUpgradeLogs(filter)
+		if err != nil {
+			return errMsg(err)
+		}
+		entries, err := database.GetUpgradeLogs(filter, logPageSize, page*logPageSize)
+		if err != nil {
+			return errMsg(err)
+		}
+		return logsMsg{entries: entries, total: total}
+	}
+}
+
 // dispatchBrewCmd maps a selected brew menu item to the appropriate background command.
 func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
-	m.state = stateLoading
 	brewfile := m.brewfile
+	database := m.database
 
-	var bgCmd tea.Cmd
 	switch title {
+	case "Logs":
+		// Load the first page immediately (no loading spinner needed).
+		m.logPage = 0
+		m.logFilter = ""
+		m.logInput.SetValue("")
+		m.logInputMode = false
+		m.state = stateLoading
+		m.loadingText = "Loading upgrade logs..."
+		return m, tea.Batch(m.spinner.Tick, m.fetchLogs())
+
 	case "Update":
+		m.state = stateLoading
 		m.loadingText = "Running brew update..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			out, err := brew.Update()
 			if err != nil {
 				return errMsg(err)
 			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Upgrade All":
+		m.state = stateLoading
 		m.loadingText = "Running brew bundle install..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
+			// Capture what's about to be upgraded for logging.
+			diffs, _ := brew.SmartDiff(brewfile)
+
 			out, err := brew.Upgrade(brewfile)
 			if err != nil {
 				return errMsg(err)
 			}
+			// Log each upgraded package to the DB.
+			for _, d := range diffs {
+				_ = database.LogUpgrade(d.Name, d.CurrentVersion, d.LatestVersion)
+			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Cleanup":
+		m.state = stateLoading
 		m.loadingText = "Running brew cleanup + autoremove..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			out, err := brew.Cleanup()
 			if err != nil {
 				return errMsg(err)
 			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Diff":
+		m.state = stateLoading
 		m.loadingText = "Computing Smart Diff..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			results, err := brew.SmartDiff(brewfile)
 			if err != nil {
 				return errMsg(err)
 			}
 			return resultMsg{content: brew.FormatDiffResults(results)}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Unstaged":
+		m.state = stateLoading
 		m.loadingText = "Checking unstaged packages..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			out, err := brew.Unstaged(brewfile)
 			if err != nil {
 				return errMsg(err)
@@ -143,32 +246,38 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Remove":
+		m.state = stateLoading
 		m.loadingText = "Running brew bundle cleanup --force..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			out, err := brew.Remove(brewfile)
 			if err != nil {
 				return errMsg(err)
 			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	case "Cheatsheet":
+		m.state = stateLoading
 		m.loadingText = "Loading cheatsheet..."
-		bgCmd = func() tea.Msg {
+		bgCmd := func() tea.Msg {
 			out, err := brew.Cheatsheet()
 			if err != nil {
 				return errMsg(err)
 			}
 			return resultMsg{content: out}
 		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
 	default:
 		m.result = fmt.Sprintf("Unknown command: %q", title)
 		m.state = stateResult
 		return m, nil
 	}
-
-	return m, tea.Batch(m.spinner.Tick, bgCmd)
 }
+
+// logPageFromDB is a helper type so db is available without import cycle.
+type logPageFromDB = db.UpgradeLog

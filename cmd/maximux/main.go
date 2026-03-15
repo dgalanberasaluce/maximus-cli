@@ -29,7 +29,7 @@ func main() {
 	defer database.Close()
 
 	// 3. Start the TUI.
-	m := tui.New(cfg.BrewfilePath)
+	m := tui.New(cfg.BrewfilePath, database)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "maximus: TUI error: %v\n", err)

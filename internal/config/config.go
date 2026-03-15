@@ -68,7 +68,7 @@ func Load() (*Config, error) {
 func loadOrCreateSettings(path, home string) (fileSettings, error) {
 	// Default brewfile path points to the user's dotfiles repo.
 	defaults := fileSettings{
-		BrewfilePath: filepath.Join(home, "git/github/dgalanberasaluce/dotfiles/app/brew/Brewfile"),
+		BrewfilePath: filepath.Join(home, "Brewfile"),
 	}
 
 	data, err := os.ReadFile(path)

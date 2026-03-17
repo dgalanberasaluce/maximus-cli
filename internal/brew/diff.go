@@ -34,11 +34,11 @@ func SmartDiff(brewfilePath string) ([]DiffResult, error) {
 	brewfileSet := sortedSet(bundleLines)
 
 	// Step 2: get ALL outdated packages with version info in one shot.
-	// `brew outdated` (no flags) returns lines like:
+	// `brew outdated --verbose` returns lines like:
 	//   name (currentVersion) < latestVersion
 	// We avoid passing explicit package names to brew to prevent exit status 1
 	// for casks or tap-scoped formulae.
-	verboseLines, err := runCommandLines("brew", "outdated")
+	verboseLines, err := runCommandLines("brew", "outdated", "--verbose")
 	if err != nil {
 		return nil, fmt.Errorf("smart diff: check outdated packages: %w", err)
 	}

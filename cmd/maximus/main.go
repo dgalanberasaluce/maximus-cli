@@ -1,4 +1,4 @@
-// Command maximux is the entry point for the Maximus CLI tool.
+// Command maximus is the entry point for the Maximus CLI tool.
 package main
 
 import (
@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	// 1. Load configuration (creates ~/.config/maximux-cli if needed).
+	// 1. Load configuration (creates ~/.config/maximus-cli if needed).
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "maximus: config error: %v\n", err)

@@ -10,9 +10,9 @@ import (
 
 const (
 	// AppName is the application identifier used for directory naming.
-	AppName = "maximux-cli"
+	AppName = "maximus-cli"
 	// DBName is the SQLite3 database filename.
-	DBName = "maximux.db"
+	DBName = "maximus.db"
 	// configFileName is the JSON settings file inside the config dir.
 	configFileName = "config.json"
 )
@@ -24,7 +24,7 @@ type fileSettings struct {
 
 // Config holds all application configuration.
 type Config struct {
-	// ConfigDir is the base configuration directory (~/.config/maximux-cli).
+	// ConfigDir is the base configuration directory (~/.config/maximus-cli).
 	ConfigDir string
 	// BrewfilePath is the full path to the Brewfile (from config.json).
 	BrewfilePath string

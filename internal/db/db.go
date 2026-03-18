@@ -1,4 +1,4 @@
-// Package db manages the SQLite3 database for maximux-cli history and settings.
+// Package db manages the SQLite3 database for maximus-cli history and settings.
 package db
 
 import (

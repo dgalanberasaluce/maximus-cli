@@ -1,6 +1,6 @@
 # Variables
 BINARY_NAME=bin/maximus
-MAIN_PKG=./cmd/maximux
+MAIN_PKG=./cmd/maximus
 
 # ==============================================================================
 # Main Targets

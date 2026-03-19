@@ -45,3 +45,4 @@ vendor/
 
 .agents
 skills-lock.json
+dist/

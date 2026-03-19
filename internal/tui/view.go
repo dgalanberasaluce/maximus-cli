@@ -6,14 +6,16 @@ import (
 
 	"maximus-cli/internal/db"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
-// View renders the current model state to a string.
-func (m Model) View() string {
+// View renders the current model state as a tea.View.
+func (m Model) View() tea.View {
+	var content string
 	switch m.state {
 	case stateLoading:
-		return "\n\n   " + m.spinner.View() + " " + m.loadingText + "\n\n"
+		content = "\n\n   " + m.spinner.View() + " " + m.loadingText + "\n\n"
 
 	case stateResult:
 		wrapWidth := m.width - 4
@@ -22,20 +24,24 @@ func (m Model) View() string {
 		}
 		formatted := lipgloss.NewStyle().Width(wrapWidth).Render(m.result)
 		formatted = strings.ReplaceAll(formatted, "Error:", "\n⚠  Error:\n")
-		return "\n" + formatted + "\n\n" + helpStyle.Render("(press q or esc to go back)") + "\n"
+		content = "\n" + formatted + "\n\n" + helpStyle.Render("(press q or esc to go back)") + "\n"
 
 	case stateBrewLogs:
-		return m.renderLogs()
+		content = m.renderLogs()
 
 	case stateUnstaged:
-		return m.renderUnstaged()
+		content = m.renderUnstaged()
 
 	case stateBrewMenu:
-		return m.brewList.View()
+		content = m.brewList.View()
 
 	default: // stateMainMenu
-		return m.mainList.View()
+		content = m.mainList.View()
 	}
+
+	v := tea.NewView(content)
+	v.AltScreen = true
+	return v
 }
 
 // renderLogs renders the paginated upgrade log table.

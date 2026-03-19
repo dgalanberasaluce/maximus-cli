@@ -5,11 +5,11 @@ import (
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
 
-	"github.com/charmbracelet/bubbles/list"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // viewState represents which screen is currently displayed.
@@ -131,7 +131,7 @@ func New(brewfilePath string, database *db.DB) Model {
 	ti := textinput.New()
 	ti.Placeholder = "package name..."
 	ti.CharLimit = 60
-	ti.Width = 40
+	ti.SetWidth(40)
 
 	return Model{
 		state:    stateMainMenu,

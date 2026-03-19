@@ -6,7 +6,7 @@ import (
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // Update processes incoming messages and updates model state.
@@ -50,7 +50,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateBrewLogs
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
@@ -86,7 +86,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.unstagedCursor < n-1 {
 					m.unstagedCursor++
 				}
-			case " ":
+			case "space":
 				// Toggle the currently highlighted package.
 				if m.unstagedSelected == nil {
 					m.unstagedSelected = make(map[int]bool)

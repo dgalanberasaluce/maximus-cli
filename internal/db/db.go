@@ -298,6 +298,46 @@ func (d *DB) CountAdditionLogs(filter string) (int, error) {
 	return count, nil
 }
 
+// GetInstallDate returns the date on which the given version of a package was
+// first recorded in the database. It queries upgrade_log first (new_version
+// column), then package_addition_log (version column). Returns a zero time
+// and nil error when no record is found.
+func (d *DB) GetInstallDate(packageName, version string) (time.Time, error) {
+	var ts string
+	err := d.conn.QueryRow(
+		`SELECT upgraded_at FROM upgrade_log
+		  WHERE package_name = ? AND new_version = ?
+		  ORDER BY upgraded_at ASC
+		  LIMIT 1`,
+		packageName, version,
+	).Scan(&ts)
+	if err != nil && err != sql.ErrNoRows {
+		return time.Time{}, fmt.Errorf("db: get install date from upgrade_log %q: %w", packageName, err)
+	}
+	if err == nil && ts != "" {
+		t, _ := time.Parse(time.RFC3339, ts)
+		return t, nil
+	}
+
+	// Fall back to package_addition_log.
+	err = d.conn.QueryRow(
+		`SELECT added_at FROM package_addition_log
+		  WHERE package_name = ? AND version = ?
+		  ORDER BY added_at ASC
+		  LIMIT 1`,
+		packageName, version,
+	).Scan(&ts)
+	if err != nil && err != sql.ErrNoRows {
+		return time.Time{}, fmt.Errorf("db: get install date from addition_log %q: %w", packageName, err)
+	}
+	if err == nil && ts != "" {
+		t, _ := time.Parse(time.RFC3339, ts)
+		return t, nil
+	}
+
+	return time.Time{}, nil
+}
+
 // Stats holds database statistics for the self-doctor.
 type Stats struct {
 	Path          string

@@ -21,7 +21,18 @@ const (
 	stateLoading
 	stateResult
 	stateBrewLogs
-	stateUnstaged // interactive unstaged packages screen
+	stateUnstaged    // interactive unstaged packages screen
+	stateBrewVersion // installed package version table
+)
+
+// versionSortField identifies which column is used for sorting the version table.
+type versionSortField int
+
+const (
+	sortByName versionSortField = iota
+	sortByKind
+	sortByMetaDate
+	sortByInstallDate
 )
 
 const (
@@ -77,6 +88,16 @@ type Model struct {
 	unstagedPackages []brew.UnstagedPackage
 	unstagedCursor   int          // index of currently highlighted row
 	unstagedSelected map[int]bool // selected package indices
+
+	// Version table state
+	versionItems     []brew.PackageVersion // all items (unfiltered)
+	versionFiltered  []brew.PackageVersion // items after applying filter
+	versionCursor    int                   // highlighted row index
+	versionFilter    string                // active filter string
+	versionSortField versionSortField      // current sort column
+	versionSortAsc   bool                  // true = ascending
+	versionInput     textinput.Model
+	versionInputMode bool // true when filter text input is focused
 }
 
 // styles
@@ -117,6 +138,7 @@ func New(brewfilePath string, database *db.DB) Model {
 		menuItem{title: "Diff", desc: "Compare Brewfile with system — show available upgrades (Smart Diff)"},
 		menuItem{title: "Unstaged", desc: "Show packages installed but not in Brewfile (brew bundle cleanup --dry-run)"},
 		menuItem{title: "Remove", desc: "⚠  Remove packages not in Brewfile (brew bundle cleanup --force)"},
+		menuItem{title: "Version", desc: "Show installed versions of all Brewfile packages (sortable & filterable)"},
 		menuItem{title: "Logs", desc: "View upgrade history (last 20 entries, filterable)"},
 		menuItem{title: "Cheatsheet", desc: "Quick reference for Homebrew commands"},
 	}
@@ -133,14 +155,22 @@ func New(brewfilePath string, database *db.DB) Model {
 	ti.CharLimit = 60
 	ti.SetWidth(40)
 
+	vi := textinput.New()
+	vi.Placeholder = "filter packages..."
+	vi.CharLimit = 60
+	vi.SetWidth(40)
+
 	return Model{
-		state:    stateMainMenu,
-		mainList: ml,
-		brewList: bl,
-		spinner:  s,
-		brewfile: brewfilePath,
-		database: database,
-		logInput: ti,
+		state:            stateMainMenu,
+		mainList:         ml,
+		brewList:         bl,
+		spinner:          s,
+		brewfile:         brewfilePath,
+		database:         database,
+		logInput:         ti,
+		versionInput:     vi,
+		versionSortField: sortByName,
+		versionSortAsc:   true,
 	}
 }
 

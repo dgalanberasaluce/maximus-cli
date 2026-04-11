@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
@@ -50,10 +52,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateBrewLogs
 		return m, nil
 
+	case versionMsg:
+		m.versionItems = msg.packages
+		m.versionCursor = 0
+		m.versionFilter = ""
+		m.versionInput.SetValue("")
+		m.versionInputMode = false
+		m = applyVersionFilter(m)
+		m.state = stateBrewVersion
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		}
+
+		// --- Version table: filter input mode ---
+		if m.state == stateBrewVersion && m.versionInputMode {
+			switch msg.String() {
+			case "enter":
+				m.versionFilter = m.versionInput.Value()
+				m.versionInputMode = false
+				m.versionCursor = 0
+				m = applyVersionFilter(m)
+				return m, nil
+			case "esc":
+				m.versionInputMode = false
+				return m, nil
+			default:
+				m.versionInput, cmd = m.versionInput.Update(msg)
+				return m, cmd
+			}
+		}
+
+		// --- Version table navigation ---
+		if m.state == stateBrewVersion {
+			n := len(m.versionFiltered)
+			switch msg.String() {
+			case "up", "k":
+				if m.versionCursor > 0 {
+					m.versionCursor--
+				}
+			case "down", "j":
+				if m.versionCursor < n-1 {
+					m.versionCursor++
+				}
+			case "/":
+				m.versionInput.SetValue(m.versionFilter)
+				m.versionInput.Focus()
+				m.versionInputMode = true
+			case "r":
+				m.versionFilter = ""
+				m.versionInput.SetValue("")
+				m.versionCursor = 0
+				m.versionSortField = sortByName
+				m.versionSortAsc = true
+				m = applyVersionFilter(m)
+			case "s":
+				// Cycle through sort columns.
+				m.versionSortField = (m.versionSortField + 1) % 4
+				m.versionCursor = 0
+				m = applyVersionFilter(m)
+			case "o":
+				// Toggle sort order.
+				m.versionSortAsc = !m.versionSortAsc
+				m.versionCursor = 0
+				m = applyVersionFilter(m)
+			case "esc", "q":
+				m.state = stateBrewMenu
+			}
+			return m, nil
 		}
 
 		// --- Log view input mode: route keys to the text input ---
@@ -321,6 +390,20 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
+	case "Version":
+		m.state = stateLoading
+		m.loadingText = "Loading installed versions..."
+		brewfile := m.brewfile
+		database := m.database
+		bgCmd := func() tea.Msg {
+			pkgs, err := brew.ListVersions(brewfile, database)
+			if err != nil {
+				return errMsg(err)
+			}
+			return versionMsg{packages: pkgs}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
 	case "Cheatsheet":
 		m.state = stateLoading
 		m.loadingText = "Loading cheatsheet..."
@@ -342,6 +425,11 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 
 // logPageFromDB is a helper type so db is available without import cycle.
 type logPageFromDB = db.UpgradeLog
+
+// versionMsg carries the fetched package list back to the model.
+type versionMsg struct {
+	packages []brew.PackageVersion
+}
 
 // unstagedMsg carries the list of unstaged packages back to the model.
 type unstagedMsg struct {
@@ -371,4 +459,39 @@ func installedVersion(name string) string {
 		return "(unknown)"
 	}
 	return out
+}
+
+// applyVersionFilter applies the current filter and sort to m.versionItems,
+// storing the result in m.versionFiltered.
+func applyVersionFilter(m Model) Model {
+	filter := strings.ToLower(m.versionFilter)
+	var filtered []brew.PackageVersion
+	for _, p := range m.versionItems {
+		if filter == "" || strings.Contains(strings.ToLower(p.Name), filter) ||
+			strings.Contains(strings.ToLower(p.Kind), filter) {
+			filtered = append(filtered, p)
+		}
+	}
+
+	// Sort.
+	sort.SliceStable(filtered, func(i, j int) bool {
+		var less bool
+		switch m.versionSortField {
+		case sortByKind:
+			less = filtered[i].Kind < filtered[j].Kind
+		case sortByMetaDate:
+			less = filtered[i].MetadataDate.Before(filtered[j].MetadataDate)
+		case sortByInstallDate:
+			less = filtered[i].InstallDate.Before(filtered[j].InstallDate)
+		default: // sortByName
+			less = filtered[i].Name < filtered[j].Name
+		}
+		if m.versionSortAsc {
+			return less
+		}
+		return !less
+	})
+
+	m.versionFiltered = filtered
+	return m
 }

@@ -19,13 +19,7 @@ func (m Model) View() tea.View {
 		content = "\n\n   " + m.spinner.View() + " " + m.loadingText + "\n\n"
 
 	case stateResult:
-		wrapWidth := m.width - 4
-		if wrapWidth < 40 {
-			wrapWidth = 80
-		}
-		formatted := lipgloss.NewStyle().Width(wrapWidth).Render(m.result)
-		formatted = strings.ReplaceAll(formatted, "Error:", "\n⚠  Error:\n")
-		content = "\n" + formatted + "\n\n" + helpStyle.Render("(press q or esc to go back)") + "\n"
+		content = m.viewport.View() + "\n\n" + helpStyle.Render("(press q or esc to go back)") + "\n"
 
 	case stateBrewLogs:
 		content = m.renderLogs()
@@ -144,7 +138,30 @@ func (m Model) renderUnstaged() string {
 	sb.WriteString(fmt.Sprintf("  %-4s  %-10s  %s\n", "", "TYPE", "PACKAGE"))
 	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 50)) + "\n")
 
-	for i, p := range m.unstagedPackages {
+	// Calculate viewport for rows.
+	const chromeHeight = 12
+	maxRows := m.height - chromeHeight
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	start := 0
+	if len(m.unstagedPackages) > maxRows {
+		start = m.unstagedCursor - (maxRows / 2)
+		if start < 0 {
+			start = 0
+		}
+		if start+maxRows > len(m.unstagedPackages) {
+			start = len(m.unstagedPackages) - maxRows
+		}
+	}
+	end := start + maxRows
+	if end > len(m.unstagedPackages) {
+		end = len(m.unstagedPackages)
+	}
+
+	for i := start; i < end; i++ {
+		p := m.unstagedPackages[i]
 		checked := "[ ]"
 		if m.unstagedSelected[i] {
 			checked = "[✓]"
@@ -211,8 +228,14 @@ func (m Model) renderVersionTable() string {
 		}
 
 		start := 0
-		if m.versionCursor >= maxRows {
-			start = m.versionCursor - maxRows + 1
+		if len(m.versionFiltered) > maxRows {
+			start = m.versionCursor - (maxRows / 2)
+			if start < 0 {
+				start = 0
+			}
+			if start+maxRows > len(m.versionFiltered) {
+				start = len(m.versionFiltered) - maxRows
+			}
 		}
 		end := start + maxRows
 		if end > len(m.versionFiltered) {

@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -75,6 +76,7 @@ type Model struct {
 	height      int
 	brewfile    string // path passed from config
 	database    *db.DB // database connection
+	viewport    viewport.Model
 
 	// Log viewer state
 	logEntries   []db.UpgradeLog
@@ -160,6 +162,9 @@ func New(brewfilePath string, database *db.DB) Model {
 	vi.CharLimit = 60
 	vi.SetWidth(40)
 
+	vp := viewport.New()
+	vp.Style = lipgloss.NewStyle().Padding(1, 2)
+
 	return Model{
 		state:            stateMainMenu,
 		mainList:         ml,
@@ -171,6 +176,7 @@ func New(brewfilePath string, database *db.DB) Model {
 		versionInput:     vi,
 		versionSortField: sortByName,
 		versionSortAsc:   true,
+		viewport:         vp,
 	}
 }
 

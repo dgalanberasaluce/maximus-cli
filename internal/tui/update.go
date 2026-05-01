@@ -9,6 +9,7 @@ import (
 	"maximus-cli/internal/db"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // Update processes incoming messages and updates model state.
@@ -23,15 +24,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.mainList.SetSize(msg.Width, msg.Height)
 		m.brewList.SetSize(msg.Width, msg.Height)
+		m.viewport.SetWidth(msg.Width)
+		m.viewport.SetHeight(msg.Height - 6)
 
 	case errMsg:
 		m.result = fmt.Sprintf("Error:\n%v", error(msg))
 		m.state = stateResult
+		m.viewport.SetContent(m.formatResult(m.result))
+		m.viewport.GotoTop()
 		return m, nil
 
 	case resultMsg:
 		m.result = msg.content
 		m.state = stateResult
+		m.viewport.SetContent(m.formatResult(msg.content))
+		m.viewport.GotoTop()
 		return m, nil
 
 	case unstagedMsg:
@@ -277,6 +284,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateLoading:
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+	case stateResult:
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
 	case stateBrewVersion:
 		if m.versionInputMode {
 			m.versionInput, cmd = m.versionInput.Update(msg)
@@ -504,4 +514,15 @@ func applyVersionFilter(m Model) Model {
 
 	m.versionFiltered = filtered
 	return m
+}
+
+// formatResult prepares a string for display in the results viewport.
+func (m Model) formatResult(content string) string {
+	wrapWidth := m.width - 4
+	if wrapWidth < 40 {
+		wrapWidth = 80
+	}
+	formatted := lipgloss.NewStyle().Width(wrapWidth).Render(content)
+	formatted = strings.ReplaceAll(formatted, "Error:", "\n⚠  Error:\n")
+	return "\n" + formatted
 }

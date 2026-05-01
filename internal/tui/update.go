@@ -68,26 +68,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		// --- Version table: filter input mode ---
-		if m.state == stateBrewVersion && m.versionInputMode {
-			switch msg.String() {
-			case "enter":
-				m.versionFilter = m.versionInput.Value()
-				m.versionInputMode = false
-				m.versionCursor = 0
-				m = applyVersionFilter(m)
-				return m, nil
-			case "esc":
-				m.versionInputMode = false
-				return m, nil
-			default:
+		// --- Version table logic ---
+		if m.state == stateBrewVersion {
+			if m.versionInputMode {
+				switch msg.String() {
+				case "enter":
+					m.versionFilter = m.versionInput.Value()
+					m.versionInputMode = false
+					m.versionCursor = 0
+					m = applyVersionFilter(m)
+					return m, nil
+				case "esc":
+					m.versionInputMode = false
+					return m, nil
+				}
+				// Pass other keys to the textinput component.
 				m.versionInput, cmd = m.versionInput.Update(msg)
 				return m, cmd
 			}
-		}
 
-		// --- Version table navigation ---
-		if m.state == stateBrewVersion {
+			// Navigation mode (not input mode)
 			n := len(m.versionFiltered)
 			switch msg.String() {
 			case "up", "k":
@@ -98,6 +98,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.versionCursor < n-1 {
 					m.versionCursor++
 				}
+			case "left", "h":
+				// Move sort column left.
+				m.versionSortField = (m.versionSortField + 3) % 4
+				m.versionCursor = 0
+				m = applyVersionFilter(m)
+			case "right", "l":
+				// Move sort column right.
+				m.versionSortField = (m.versionSortField + 1) % 4
+				m.versionCursor = 0
+				m = applyVersionFilter(m)
 			case "/":
 				m.versionInput.SetValue(m.versionFilter)
 				m.versionInput.Focus()
@@ -109,12 +119,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.versionSortField = sortByName
 				m.versionSortAsc = true
 				m = applyVersionFilter(m)
-			case "s":
-				// Cycle through sort columns.
-				m.versionSortField = (m.versionSortField + 1) % 4
-				m.versionCursor = 0
-				m = applyVersionFilter(m)
-			case "o":
+			case "s", "o":
 				// Toggle sort order.
 				m.versionSortAsc = !m.versionSortAsc
 				m.versionCursor = 0
@@ -272,6 +277,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateLoading:
 		m.spinner, cmd = m.spinner.Update(msg)
 		cmds = append(cmds, cmd)
+	case stateBrewVersion:
+		if m.versionInputMode {
+			m.versionInput, cmd = m.versionInput.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)

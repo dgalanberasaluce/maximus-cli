@@ -176,7 +176,7 @@ func truncate(s string, max int) string {
 }
 
 // renderVersionTable renders the installed Brewfile packages as a sortable,
-// filterable table.
+// filterable table with a scrollable viewport.
 func (m Model) renderVersionTable() string {
 	var sb strings.Builder
 
@@ -202,7 +202,24 @@ func (m Model) renderVersionTable() string {
 	if len(m.versionFiltered) == 0 {
 		sb.WriteString("  No packages found.\n")
 	} else {
-		sb.WriteString(versionTableRows(m.versionFiltered, m.versionSortField, m.versionSortAsc, m.versionCursor))
+		// Calculate viewport.
+		// We subtract lines used by headers and footers from total height.
+		const chromeHeight = 12
+		maxRows := m.height - chromeHeight
+		if maxRows < 1 {
+			maxRows = 1
+		}
+
+		start := 0
+		if m.versionCursor >= maxRows {
+			start = m.versionCursor - maxRows + 1
+		}
+		end := start + maxRows
+		if end > len(m.versionFiltered) {
+			end = len(m.versionFiltered)
+		}
+
+		sb.WriteString(versionTableRows(m.versionFiltered[start:end], m.versionSortField, m.versionSortAsc, m.versionCursor-start))
 	}
 
 	// ── Stats line ──────────────────────────────────────────────────────────
@@ -215,7 +232,7 @@ func (m Model) renderVersionTable() string {
 
 	// ── Key hints ───────────────────────────────────────────────────────────
 	sb.WriteString(helpStyle.Render(
-		"  ↑/↓ navigate · / filter · r reset · s sort col · o order · q back",
+		"  ↑/↓ navigate · ←/→ sort col · / filter · r reset · s/o order · q back",
 	))
 	sb.WriteString("\n")
 

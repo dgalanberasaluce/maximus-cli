@@ -24,6 +24,9 @@ const (
 	stateBrewLogs
 	stateUnstaged    // interactive unstaged packages screen
 	stateBrewVersion // installed package version table
+	stateUpgradePkgs // select and upgrade specific packages screen
+	stateHomeMenu    // home sub-menu (Explain / Reload)
+	stateHomeDotfiles // home dotfiles table
 )
 
 // versionSortField identifies which column is used for sorting the version table.
@@ -36,9 +39,29 @@ const (
 	sortByInstallDate
 )
 
+// dotfileSortField identifies which column is used for sorting the dotfiles table.
+type dotfileSortField int
+
+const (
+	sortDFByName dotfileSortField = iota
+	sortDFByType
+	sortDFByTool
+	sortDFByModified
+	sortDFByCreated
+)
+
 const (
 	logPageSize = 20 // default entries per page
 	logMaxLimit = 100
+)
+
+// typeFilter restricts the dotfiles table to files, directories, or all entries.
+type typeFilter int
+
+const (
+	typeFilterAll   typeFilter = iota // show all
+	typeFilterFiles                   // files only
+	typeFilterDirs                    // directories only
 )
 
 // menuItem is a selectable list entry with a title and description.
@@ -91,6 +114,11 @@ type Model struct {
 	unstagedCursor   int          // index of currently highlighted row
 	unstagedSelected map[int]bool // selected package indices
 
+	// Upgrade packages state
+	upgradePkgs     []brew.DiffResult
+	upgradeCursor   int          // index of currently highlighted row
+	upgradeSelected map[int]bool // selected package indices
+
 	// Version table state
 	versionItems     []brew.PackageVersion // all items (unfiltered)
 	versionFiltered  []brew.PackageVersion // items after applying filter
@@ -100,6 +128,25 @@ type Model struct {
 	versionSortAsc   bool                  // true = ascending
 	versionInput     textinput.Model
 	versionInputMode bool // true when filter text input is focused
+
+	// Home sub-menu & dotfiles state
+	homeList         list.Model
+	dotfileItems     []db.DotfileEntry // all items (unfiltered)
+	dotfileFiltered  []db.DotfileEntry // items after applying filter
+	dotfileCursor    int               // highlighted row index
+	dotfileFilter    string            // active text filter string
+	dotfileTypeFilter typeFilter        // file/dir/all filter
+	dotfileSortField dotfileSortField  // current sort column
+	dotfileSortAsc   bool              // true = ascending
+	dotfileInput     textinput.Model
+	dotfileInputMode bool              // true when text filter input is focused
+	dotfileToolInput     textinput.Model
+	dotfileToolEditMode  bool          // true when editing a tool description
+	returnState          viewState     // the state to return to from stateResult
+	dotfilePreviewFocused bool          // true when the preview panel has focus
+	dotfileDeleteMode     bool          // true when confirming deletion of a dotfile
+	dotfileDeleteInput    textinput.Model // input for typing file name to delete
+	previewViewport       viewport.Model // viewport for scrollable preview pane
 }
 
 // styles
@@ -127,15 +174,25 @@ var (
 // database is the open SQLite3 connection.
 func New(brewfilePath string, database *db.DB) Model {
 	mainItems := []list.Item{
+		menuItem{title: "Home", desc: "Manage and explain dotfiles in $HOME"},
 		menuItem{title: "Brew", desc: "Manage Homebrew packages"},
 	}
 	ml := list.New(mainItems, list.NewDefaultDelegate(), 0, 0)
 	ml.Title = "Maximus CLI"
 	ml.SetShowStatusBar(false)
 
+	homeItems := []list.Item{
+		menuItem{title: "Explain", desc: "Show dotfiles/folders table in $HOME with tool explanations"},
+		menuItem{title: "Reload", desc: "Rescan $HOME directory and refresh the database"},
+	}
+	hl := list.New(homeItems, list.NewDefaultDelegate(), 0, 0)
+	hl.Title = "Home Options"
+	hl.SetShowStatusBar(false)
+
 	brewItems := []list.Item{
 		menuItem{title: "Update", desc: "Refresh the Homebrew package database (brew update)"},
 		menuItem{title: "Upgrade All", desc: "Install all packages from Brewfile (brew bundle install)"},
+		menuItem{title: "Upgrade Package(s)", desc: "Select and upgrade specific packages"},
 		menuItem{title: "Cleanup", desc: "Remove stale packages and unused dependencies (brew cleanup + autoremove)"},
 		menuItem{title: "Diff", desc: "Compare Brewfile with system — show available upgrades (Smart Diff)"},
 		menuItem{title: "Unstaged", desc: "Show packages installed but not in Brewfile (brew bundle cleanup --dry-run)"},
@@ -162,21 +219,48 @@ func New(brewfilePath string, database *db.DB) Model {
 	vi.CharLimit = 60
 	vi.SetWidth(40)
 
+	di := textinput.New()
+	di.Placeholder = "filter dotfiles..."
+	di.CharLimit = 60
+	di.SetWidth(40)
+
+	eti := textinput.New()
+	eti.Placeholder = "tool name..."
+	eti.CharLimit = 80
+	eti.SetWidth(40)
+
 	vp := viewport.New()
 	vp.Style = lipgloss.NewStyle().Padding(1, 2)
 
+	dti := textinput.New()
+	dti.Placeholder = "type name to confirm..."
+	dti.CharLimit = 80
+	dti.SetWidth(40)
+
+	pv := viewport.New()
+
 	return Model{
-		state:            stateMainMenu,
-		mainList:         ml,
-		brewList:         bl,
-		spinner:          s,
-		brewfile:         brewfilePath,
-		database:         database,
-		logInput:         ti,
-		versionInput:     vi,
-		versionSortField: sortByName,
-		versionSortAsc:   true,
-		viewport:         vp,
+		state:                 stateMainMenu,
+		returnState:           stateMainMenu,
+		mainList:              ml,
+		homeList:              hl,
+		brewList:              bl,
+		spinner:               s,
+		brewfile:              brewfilePath,
+		database:              database,
+		logInput:              ti,
+		versionInput:          vi,
+		versionSortField:      sortByName,
+		versionSortAsc:        true,
+		viewport:              vp,
+		dotfileInput:          di,
+		dotfileSortField:      sortDFByName,
+		dotfileSortAsc:        true,
+		dotfileToolInput:      eti,
+		dotfileDeleteInput:    dti,
+		previewViewport:       pv,
+		dotfilePreviewFocused: false,
+		dotfileDeleteMode:     false,
 	}
 }
 

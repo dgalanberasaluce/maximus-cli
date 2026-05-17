@@ -6,3 +6,10 @@ package brew
 func Upgrade(brewfilePath string) (string, error) {
 	return runCommand("brew", "bundle", "install", "--file", brewfilePath)
 }
+
+// UpgradePackages runs `brew upgrade` on specific packages.
+// Returns the command output.
+func UpgradePackages(packages []string) (string, error) {
+	args := append([]string{"upgrade"}, packages...)
+	return runCommand("brew", args...)
+}

@@ -33,8 +33,8 @@ type brewInfoJSON struct {
 }
 
 type formulaJSON struct {
-	Name      string          `json:"name"`
-	FullName  string          `json:"full_name"`
+	Name      string             `json:"name"`
+	FullName  string             `json:"full_name"`
 	Installed []formulaInstalled `json:"installed"`
 }
 

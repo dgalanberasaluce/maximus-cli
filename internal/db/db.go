@@ -4,6 +4,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -68,12 +69,27 @@ func (d *DB) migrate() error {
 			added_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_addition_log_package ON package_addition_log(package_name)`,
+		`CREATE TABLE IF NOT EXISTS dotfiles (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT NOT NULL UNIQUE,
+			is_dir      BOOLEAN NOT NULL DEFAULT 0,
+			tool        TEXT NOT NULL DEFAULT '',
+			tool_manual BOOLEAN NOT NULL DEFAULT 0,
+			modified_at DATETIME NOT NULL,
+			created_at  DATETIME NOT NULL,
+			scanned_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_dotfiles_name ON dotfiles(name)`,
 	}
 	for _, q := range queries {
 		if _, err := d.conn.Exec(q); err != nil {
 			return fmt.Errorf("migration failed: %w", err)
 		}
 	}
+
+	// Dynamic migration for existing databases:
+	_, _ = d.conn.Exec(`ALTER TABLE dotfiles ADD COLUMN tool_manual BOOLEAN NOT NULL DEFAULT 0`)
+
 	return nil
 }
 
@@ -345,6 +361,7 @@ type Stats struct {
 	HistoryCount  int
 	UpgradeCount  int
 	AdditionCount int
+	DotfileCount  int
 }
 
 // Doctor returns diagnostic information about the database.
@@ -363,5 +380,148 @@ func (d *DB) Doctor() (*Stats, error) {
 	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM package_addition_log`).Scan(&s.AdditionCount); err != nil {
 		return nil, fmt.Errorf("db: doctor addition count: %w", err)
 	}
+	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM dotfiles`).Scan(&s.DotfileCount); err != nil {
+		return nil, fmt.Errorf("db: doctor dotfiles count: %w", err)
+	}
 	return s, nil
+}
+
+// DotfileEntry represents a scanned dotfile or dotfolder in $HOME.
+type DotfileEntry struct {
+	ID         int64
+	Name       string
+	IsDir      bool
+	Tool       string
+	ToolManual bool
+	ModifiedAt time.Time
+	CreatedAt  time.Time
+	ScannedAt  time.Time
+}
+
+// UpsertDotfile inserts or updates a dotfile entry.
+func (d *DB) UpsertDotfile(name string, isDir bool, tool string, modifiedAt, createdAt time.Time) error {
+	_, err := d.conn.Exec(
+		`INSERT INTO dotfiles(name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at)
+		 VALUES (?, ?, ?, 0, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET
+		 	is_dir=excluded.is_dir,
+		 	tool=CASE WHEN dotfiles.tool_manual=1 THEN dotfiles.tool ELSE excluded.tool END,
+		 	modified_at=excluded.modified_at,
+		 	created_at=excluded.created_at,
+		 	scanned_at=excluded.scanned_at`,
+		name, isDir, tool,
+		modifiedAt.UTC().Format(time.RFC3339),
+		createdAt.UTC().Format(time.RFC3339),
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("db: upsert dotfile %q: %w", name, err)
+	}
+	return nil
+}
+
+// UpdateDotfileTool updates only the tool field and marks tool_manual as true for a named dotfile entry.
+// This allows users to customise the inferred tool description in-place.
+func (d *DB) UpdateDotfileTool(name string, tool string) error {
+	_, err := d.conn.Exec(
+		`UPDATE dotfiles SET tool=?, tool_manual=1 WHERE name=?`,
+		tool, name,
+	)
+	if err != nil {
+		return fmt.Errorf("db: update tool for %q: %w", name, err)
+	}
+	return nil
+}
+
+// ClearDotfiles deletes all entries in the dotfiles table.
+func (d *DB) ClearDotfiles() error {
+	_, err := d.conn.Exec(`DELETE FROM dotfiles`)
+	if err != nil {
+		return fmt.Errorf("db: clear dotfiles: %w", err)
+	}
+	return nil
+}
+
+// DeleteDotfile deletes a single dotfile entry by its name.
+func (d *DB) DeleteDotfile(name string) error {
+	_, err := d.conn.Exec(`DELETE FROM dotfiles WHERE name=?`, name)
+	if err != nil {
+		return fmt.Errorf("db: delete dotfile %q: %w", name, err)
+	}
+	return nil
+}
+
+// GetDotfiles retrieves dotfile entries with filtering, sorting, and pagination.
+// limit <= 0 means no limit (represented as -1).
+func (d *DB) GetDotfiles(filter string, sortBy string, asc bool, limit, offset int) ([]DotfileEntry, error) {
+	var query strings.Builder
+	query.WriteString(`SELECT id, name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at FROM dotfiles`)
+
+	var args []any
+	if filter != "" {
+		query.WriteString(` WHERE name LIKE ?`)
+		args = append(args, "%"+filter+"%")
+	}
+
+	// Validate and build sorting
+	validSortColumns := map[string]string{
+		"name":        "name",
+		"is_dir":      "is_dir",
+		"tool":        "tool",
+		"modified_at": "modified_at",
+		"created_at":  "created_at",
+	}
+	sortCol, ok := validSortColumns[strings.ToLower(sortBy)]
+	if !ok {
+		sortCol = "name"
+	}
+
+	direction := "ASC"
+	if !asc {
+		direction = "DESC"
+	}
+	query.WriteString(fmt.Sprintf(` ORDER BY %s %s`, sortCol, direction))
+
+	if limit > 0 {
+		query.WriteString(` LIMIT ? OFFSET ?`)
+		args = append(args, limit, offset)
+	}
+
+	rows, err := d.conn.Query(query.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("db: query dotfiles: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []DotfileEntry
+	for rows.Next() {
+		var e DotfileEntry
+		var modStr, creStr, scaStr string
+		if err := rows.Scan(&e.ID, &e.Name, &e.IsDir, &e.Tool, &e.ToolManual, &modStr, &creStr, &scaStr); err != nil {
+			return nil, fmt.Errorf("db: scan dotfile: %w", err)
+		}
+		e.ModifiedAt, _ = time.Parse(time.RFC3339, modStr)
+		e.CreatedAt, _ = time.Parse(time.RFC3339, creStr)
+		e.ScannedAt, _ = time.Parse(time.RFC3339, scaStr)
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
+}
+
+// CountDotfiles returns total count of dotfiles matching the filter.
+func (d *DB) CountDotfiles(filter string) (int, error) {
+	var count int
+	var err error
+	if filter != "" {
+		err = d.conn.QueryRow(
+			`SELECT COUNT(*) FROM dotfiles WHERE name LIKE ?`,
+			"%"+filter+"%",
+		).Scan(&count)
+	} else {
+		err = d.conn.QueryRow(`SELECT COUNT(*) FROM dotfiles`).Scan(&count)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("db: count dotfiles: %w", err)
+	}
+	return count, nil
 }

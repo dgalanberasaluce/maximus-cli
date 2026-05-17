@@ -2,11 +2,15 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
+	"maximus-cli/internal/home"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -23,9 +27,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.mainList.SetSize(msg.Width, msg.Height)
+		m.homeList.SetSize(msg.Width, msg.Height)
 		m.brewList.SetSize(msg.Width, msg.Height)
 		m.viewport.SetWidth(msg.Width)
 		m.viewport.SetHeight(msg.Height - 6)
+		m = updatePreview(m)
 
 	case errMsg:
 		m.result = fmt.Sprintf("Error:\n%v", error(msg))
@@ -41,6 +47,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoTop()
 		return m, nil
 
+	case editorFinishedMsg:
+		// Editor finished. Return to the list and refresh.
+		m = applyDotfileFilter(m)
+		return m, nil
+
 	case unstagedMsg:
 		m.unstagedPackages = msg.packages
 		m.unstagedCursor = 0
@@ -51,6 +62,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.unstagedSelected = sel
 		m.state = stateUnstaged
+		return m, nil
+
+	case upgradePkgsMsg:
+		m.upgradePkgs = msg.packages
+		m.upgradeCursor = 0
+		// Pre-select all packages.
+		sel := make(map[int]bool, len(msg.packages))
+		for i := range msg.packages {
+			sel[i] = true
+		}
+		m.upgradeSelected = sel
+		m.state = stateUpgradePkgs
 		return m, nil
 
 	case logsMsg:
@@ -69,10 +92,217 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateBrewVersion
 		return m, nil
 
+	case dotfileMsg:
+		m.dotfileItems = msg.entries
+		m.dotfileCursor = 0
+		m.dotfileFilter = ""
+		m.dotfileInput.SetValue("")
+		m.dotfileInputMode = false
+		m = applyDotfileFilter(m)
+		m = updatePreview(m)
+		m.state = stateHomeDotfiles
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		}
+
+		// --- Dotfiles table logic ---
+		if m.state == stateHomeDotfiles {
+			// Priority 1: delete confirmation input mode
+			if m.dotfileDeleteMode {
+				switch msg.String() {
+				case "enter":
+					if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+						selected := m.dotfileFiltered[m.dotfileCursor]
+						if m.dotfileDeleteInput.Value() == selected.Name {
+							// Perform filesystem deletion
+							homeDir, err := os.UserHomeDir()
+							if err == nil {
+								fullPath := filepath.Join(homeDir, selected.Name)
+								_ = os.RemoveAll(fullPath)
+							}
+							// Delete from DB
+							_ = m.database.DeleteDotfile(selected.Name)
+
+							// Remove from in-memory list
+							for idx, item := range m.dotfileItems {
+								if item.Name == selected.Name {
+									m.dotfileItems = append(m.dotfileItems[:idx], m.dotfileItems[idx+1:]...)
+									break
+								}
+							}
+
+							m.dotfileDeleteMode = false
+							m.dotfileCursor = 0
+							m = applyDotfileFilter(m)
+							m = updatePreview(m)
+							return m, nil
+						}
+					}
+				case "esc":
+					m.dotfileDeleteMode = false
+					return m, nil
+				}
+				m.dotfileDeleteInput, cmd = m.dotfileDeleteInput.Update(msg)
+				return m, cmd
+			}
+
+			// Priority 2: tool-edit input mode
+			if m.dotfileToolEditMode {
+				switch msg.String() {
+				case "enter":
+					newTool := m.dotfileToolInput.Value()
+					// Find the selected item in the full list by cursor position
+					if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+						name := m.dotfileFiltered[m.dotfileCursor].Name
+						_ = m.database.UpdateDotfileTool(name, newTool)
+						// Update in-memory copies so the UI reflects the change instantly.
+						for i, e := range m.dotfileItems {
+							if e.Name == name {
+								m.dotfileItems[i].Tool = newTool
+								m.dotfileItems[i].ToolManual = true
+								break
+							}
+						}
+					}
+					m.dotfileToolEditMode = false
+					m = applyDotfileFilter(m)
+					m = updatePreview(m)
+					return m, nil
+				case "esc":
+					m.dotfileToolEditMode = false
+					return m, nil
+				}
+				m.dotfileToolInput, cmd = m.dotfileToolInput.Update(msg)
+				return m, cmd
+			}
+
+			// Priority 3: text filter input mode
+			if m.dotfileInputMode {
+				switch msg.String() {
+				case "enter":
+					m.dotfileFilter = m.dotfileInput.Value()
+					m.dotfileInputMode = false
+					m.dotfileCursor = 0
+					m = applyDotfileFilter(m)
+					m = updatePreview(m)
+					return m, nil
+				case "esc":
+					m.dotfileInputMode = false
+					return m, nil
+				}
+				m.dotfileInput, cmd = m.dotfileInput.Update(msg)
+				return m, cmd
+			}
+
+			// Priority 4: navigation mode
+			// Toggle focus with Tab
+			if msg.String() == "tab" {
+				m.dotfilePreviewFocused = !m.dotfilePreviewFocused
+				return m, nil
+			}
+
+			// When preview panel is focused:
+			if m.dotfilePreviewFocused {
+				switch msg.String() {
+				case "e":
+					// Open fullPath file in EDITOR
+					if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+						selected := m.dotfileFiltered[m.dotfileCursor]
+						if !selected.IsDir {
+							homeDir, err := os.UserHomeDir()
+							if err == nil {
+								fullPath := filepath.Join(homeDir, selected.Name)
+								editor := os.Getenv("EDITOR")
+								if editor == "" {
+									editor = "vim"
+								}
+								cmd := exec.Command(editor, fullPath)
+								return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+									return editorFinishedMsg{err}
+								})
+							}
+						}
+					}
+					return m, nil
+				case "esc", "q":
+					m.dotfilePreviewFocused = false
+					return m, nil
+				default:
+					m.previewViewport, cmd = m.previewViewport.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// When main table has focus:
+			n := len(m.dotfileFiltered)
+			switch msg.String() {
+			case "up", "k":
+				if m.dotfileCursor > 0 {
+					m.dotfileCursor--
+					m = updatePreview(m)
+				}
+			case "down", "j":
+				if m.dotfileCursor < n-1 {
+					m.dotfileCursor++
+					m = updatePreview(m)
+				}
+			case "left", "h":
+				m.dotfileSortField = (m.dotfileSortField + 4) % 5
+				m.dotfileCursor = 0
+				m = applyDotfileFilter(m)
+				m = updatePreview(m)
+			case "right", "l":
+				m.dotfileSortField = (m.dotfileSortField + 1) % 5
+				m.dotfileCursor = 0
+				m = applyDotfileFilter(m)
+				m = updatePreview(m)
+			case "/":
+				m.dotfileInput.SetValue(m.dotfileFilter)
+				m.dotfileInput.Focus()
+				m.dotfileInputMode = true
+			case "t":
+				// Cycle: All -> Files -> Dirs -> All
+				m.dotfileTypeFilter = (m.dotfileTypeFilter + 1) % 3
+				m.dotfileCursor = 0
+				m = applyDotfileFilter(m)
+				m = updatePreview(m)
+			case "e":
+				// Enter tool-edit mode for the highlighted row.
+				if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+					current := m.dotfileFiltered[m.dotfileCursor].Tool
+					m.dotfileToolInput.SetValue(current)
+					m.dotfileToolInput.Focus()
+					m.dotfileToolEditMode = true
+				}
+			case "d":
+				// Enter deletion confirmation mode for the highlighted row.
+				if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+					m.dotfileDeleteInput.SetValue("")
+					m.dotfileDeleteInput.Focus()
+					m.dotfileDeleteMode = true
+				}
+			case "r":
+				m.dotfileFilter = ""
+				m.dotfileInput.SetValue("")
+				m.dotfileTypeFilter = typeFilterAll
+				m.dotfileCursor = 0
+				m.dotfileSortField = sortDFByName
+				m.dotfileSortAsc = true
+				m = applyDotfileFilter(m)
+				m = updatePreview(m)
+			case "s", "o":
+				m.dotfileSortAsc = !m.dotfileSortAsc
+				m.dotfileCursor = 0
+				m = applyDotfileFilter(m)
+				m = updatePreview(m)
+			case "esc", "q":
+				m.state = stateHomeMenu
+			}
+			return m, nil
 		}
 
 		// --- Version table logic ---
@@ -207,6 +437,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// --- Upgrade packages screen ---
+		if m.state == stateUpgradePkgs {
+			n := len(m.upgradePkgs)
+			switch msg.String() {
+			case "up", "k":
+				if m.upgradeCursor > 0 {
+					m.upgradeCursor--
+				}
+			case "down", "j":
+				if m.upgradeCursor < n-1 {
+					m.upgradeCursor++
+				}
+			case "space":
+				if m.upgradeSelected == nil {
+					m.upgradeSelected = make(map[int]bool)
+				}
+				m.upgradeSelected[m.upgradeCursor] = !m.upgradeSelected[m.upgradeCursor]
+			case "a":
+				allSelected := len(m.upgradeSelected) == n && n > 0
+				sel := make(map[int]bool, n)
+				if !allSelected {
+					for i := range n {
+						sel[i] = true
+					}
+				}
+				m.upgradeSelected = sel
+			case "enter":
+				var chosen []brew.DiffResult
+				for i, p := range m.upgradePkgs {
+					if m.upgradeSelected[i] {
+						chosen = append(chosen, p)
+					}
+				}
+				if len(chosen) == 0 {
+					m.state = stateBrewMenu
+					return m, nil
+				}
+				database := m.database
+				m.state = stateLoading
+				m.loadingText = fmt.Sprintf("Upgrading %d package(s)...", len(chosen))
+				return m, tea.Batch(m.spinner.Tick, upgradePkgsCmd(chosen, database))
+			case "esc", "q":
+				m.state = stateBrewMenu
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// --- Log view navigation (input mode off) ---
 		if m.state == stateBrewLogs {
 			switch msg.String() {
@@ -249,10 +527,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch m.state {
 			case stateResult:
 				m.result = ""
-				m.state = stateBrewMenu
+				m.state = m.returnState
 				return m, nil
-			case stateBrewMenu:
+			case stateBrewMenu, stateHomeMenu:
 				m.state = stateMainMenu
+				return m, nil
+			case stateHomeDotfiles:
+				m.state = stateHomeMenu
 				return m, nil
 			}
 		case "enter":
@@ -263,11 +544,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.brewList.SetSize(m.width, m.height)
 						m.state = stateBrewMenu
 						return m, nil
+					} else if i.title == "Home" {
+						m.homeList.SetSize(m.width, m.height)
+						m.state = stateHomeMenu
+						return m, nil
 					}
 				}
 			case stateBrewMenu:
 				if i, ok := m.brewList.SelectedItem().(menuItem); ok {
 					return m.dispatchBrewCmd(i.title)
+				}
+			case stateHomeMenu:
+				if i, ok := m.homeList.SelectedItem().(menuItem); ok {
+					return m.dispatchHomeCmd(i.title)
 				}
 			}
 		}
@@ -277,6 +566,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.state {
 	case stateMainMenu:
 		m.mainList, cmd = m.mainList.Update(msg)
+		cmds = append(cmds, cmd)
+	case stateHomeMenu:
+		m.homeList, cmd = m.homeList.Update(msg)
 		cmds = append(cmds, cmd)
 	case stateBrewMenu:
 		m.brewList, cmd = m.brewList.Update(msg)
@@ -290,6 +582,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case stateBrewVersion:
 		if m.versionInputMode {
 			m.versionInput, cmd = m.versionInput.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	case stateHomeDotfiles:
+		if m.dotfileToolEditMode {
+			m.dotfileToolInput, cmd = m.dotfileToolInput.Update(msg)
+			cmds = append(cmds, cmd)
+		} else if m.dotfileInputMode {
+			m.dotfileInput, cmd = m.dotfileInput.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -319,6 +619,7 @@ func (m Model) fetchLogs() tea.Cmd {
 func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 	brewfile := m.brewfile
 	database := m.database
+	m.returnState = stateBrewMenu
 
 	switch title {
 	case "Logs":
@@ -359,6 +660,21 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 				_ = database.LogUpgrade(d.Name, d.CurrentVersion, d.LatestVersion)
 			}
 			return resultMsg{content: out}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "Upgrade Package(s)":
+		m.state = stateLoading
+		m.loadingText = "Checking outdated packages..."
+		bgCmd := func() tea.Msg {
+			results, err := brew.SmartDiff(brewfile)
+			if err != nil {
+				return errMsg(err)
+			}
+			if len(results) == 0 {
+				return resultMsg{content: "✓ Everything in your Brewfile is up to date!"}
+			}
+			return upgradePkgsMsg{packages: results}
 		}
 		return m, tea.Batch(m.spinner.Tick, bgCmd)
 
@@ -456,6 +772,29 @@ type unstagedMsg struct {
 	packages []brew.UnstagedPackage
 }
 
+// upgradePkgsMsg carries the list of outdated packages back to the model.
+type upgradePkgsMsg struct {
+	packages []brew.DiffResult
+}
+
+// upgradePkgsCmd executes brew upgrade on the selected packages and logs it in the database.
+func upgradePkgsCmd(pkgs []brew.DiffResult, database *db.DB) tea.Cmd {
+	return func() tea.Msg {
+		names := make([]string, len(pkgs))
+		for i, p := range pkgs {
+			names[i] = p.Name
+		}
+		out, err := brew.UpgradePackages(names)
+		if err != nil {
+			return errMsg(err)
+		}
+		for _, p := range pkgs {
+			_ = database.LogUpgrade(p.Name, p.CurrentVersion, p.LatestVersion)
+		}
+		return resultMsg{content: out}
+	}
+}
+
 // unstagedAddAllCmd adds all packages to the Brewfile and logs them to DB.
 func unstagedAddAllCmd(pkgs []brew.UnstagedPackage, brewfilePath string, database *db.DB) tea.Cmd {
 	return func() tea.Msg {
@@ -525,4 +864,181 @@ func (m Model) formatResult(content string) string {
 	formatted := lipgloss.NewStyle().Width(wrapWidth).Render(content)
 	formatted = strings.ReplaceAll(formatted, "Error:", "\n⚠  Error:\n")
 	return "\n" + formatted
+}
+
+// dotfileMsg carries the list of dotfiles back to the model.
+type dotfileMsg struct {
+	entries []db.DotfileEntry
+}
+
+// dispatchHomeCmd maps a selected home menu item to the appropriate background command.
+func (m Model) dispatchHomeCmd(title string) (tea.Model, tea.Cmd) {
+	database := m.database
+	m.returnState = stateHomeMenu
+
+	switch title {
+	case "Explain":
+		m.state = stateLoading
+		m.loadingText = "Loading dotfiles information..."
+		bgCmd := func() tea.Msg {
+			// Check if database already has entries
+			count, err := database.CountDotfiles("")
+			if err != nil {
+				return errMsg(err)
+			}
+			var entries []db.DotfileEntry
+			if count == 0 {
+				// Auto-scan if empty
+				scanRes, err := home.ScanDotfiles(database)
+				if err != nil {
+					return errMsg(err)
+				}
+				entries = scanRes.Entries
+			} else {
+				// Fetch from DB
+				entries, err = database.GetDotfiles("", "name", true, -1, 0)
+			}
+			if err != nil {
+				return errMsg(err)
+			}
+			return dotfileMsg{entries: entries}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "Reload":
+		m.state = stateLoading
+		m.loadingText = "Scanning $HOME and refreshing database..."
+		bgCmd := func() tea.Msg {
+			scanRes, err := home.ScanDotfiles(database)
+			if err != nil {
+				return errMsg(err)
+			}
+
+			// Format detailed summary of changes!
+			var sb strings.Builder
+			sb.WriteString("\n  ")
+			sb.WriteString(headerStyle.Render("Home Database Reload Summary"))
+			sb.WriteString("\n\n")
+
+			if !scanRes.LastScan.IsZero() {
+				sb.WriteString(fmt.Sprintf("  Last scan was at: %s\n\n", scanRes.LastScan.Local().Format("2006-01-02 15:04:05")))
+			} else {
+				sb.WriteString("  Last scan was at: Never (first reload)\n\n")
+			}
+
+			sb.WriteString(fmt.Sprintf("  - Added files/dirs:   %d\n", len(scanRes.Added)))
+			for _, name := range scanRes.Added {
+				sb.WriteString(fmt.Sprintf("    + %s\n", name))
+			}
+
+			sb.WriteString(fmt.Sprintf("  - Updated files/dirs: %d\n", len(scanRes.Updated)))
+			for _, name := range scanRes.Updated {
+				sb.WriteString(fmt.Sprintf("    ~ %s\n", name))
+			}
+
+			sb.WriteString(fmt.Sprintf("  - Deleted files/dirs: %d\n", len(scanRes.Deleted)))
+			for _, name := range scanRes.Deleted {
+				sb.WriteString(fmt.Sprintf("    - %s\n", name))
+			}
+
+			sb.WriteString("\n")
+			sb.WriteString("  " + warningStyle.Render("✓ Reload completed, press q to go back."))
+			sb.WriteString("\n")
+
+			return resultMsg{content: sb.String()}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	default:
+		m.result = fmt.Sprintf("Unknown command: %q", title)
+		m.state = stateResult
+		return m, nil
+	}
+}
+
+// applyDotfileFilter applies the current filter and sort to m.dotfileItems,
+// storing the result in m.dotfileFiltered.
+func applyDotfileFilter(m Model) Model {
+	textFilter := strings.ToLower(m.dotfileFilter)
+	var filtered []db.DotfileEntry
+	for _, p := range m.dotfileItems {
+		// Apply type filter first.
+		switch m.dotfileTypeFilter {
+		case typeFilterFiles:
+			if p.IsDir {
+				continue
+			}
+		case typeFilterDirs:
+			if !p.IsDir {
+				continue
+			}
+		}
+		// Apply text filter (name or tool).
+		if textFilter != "" &&
+			!strings.Contains(strings.ToLower(p.Name), textFilter) &&
+			!strings.Contains(strings.ToLower(p.Tool), textFilter) {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+
+	// Sort.
+	sort.SliceStable(filtered, func(i, j int) bool {
+		var less bool
+		switch m.dotfileSortField {
+		case sortDFByType:
+			// Dirs first when ascending.
+			less = filtered[i].IsDir && !filtered[j].IsDir
+		case sortDFByTool:
+			less = filtered[i].Tool < filtered[j].Tool
+		case sortDFByModified:
+			less = filtered[i].ModifiedAt.Before(filtered[j].ModifiedAt)
+		case sortDFByCreated:
+			less = filtered[i].CreatedAt.Before(filtered[j].CreatedAt)
+		default: // sortDFByName
+			less = filtered[i].Name < filtered[j].Name
+		}
+		if m.dotfileSortAsc {
+			return less
+		}
+		return !less
+	})
+
+	m.dotfileFiltered = filtered
+	return m
+}
+
+type editorFinishedMsg struct {
+	err error
+}
+
+func updatePreview(m Model) Model {
+	// Calculate maxRows exactly like in view.go
+	const chromeHeight = 12
+	maxRows := m.height - chromeHeight
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	const minTableWidth = 86
+	previewWidth := m.width - minTableWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+
+	m.previewViewport.SetWidth(previewWidth - 2)
+	m.previewViewport.SetHeight(maxRows - 2) // space for the header title
+
+	if len(m.dotfileFiltered) == 0 || m.dotfileCursor < 0 || m.dotfileCursor >= len(m.dotfileFiltered) {
+		m.previewViewport.SetContent("")
+		return m
+	}
+	selected := m.dotfileFiltered[m.dotfileCursor]
+	_, previewText := home.GetPreview(selected.Name, selected.IsDir)
+
+	// wrap text to fit previewWidth minus padding/borders
+	wrapped := WordWrap(previewText, previewWidth-4)
+	m.previewViewport.SetContent(wrapped)
+	m.previewViewport.GotoTop()
+	return m
 }

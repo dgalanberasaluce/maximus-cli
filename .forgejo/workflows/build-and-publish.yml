@@ -1,0 +1,78 @@
+name: Build and Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. 1.0.0)'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '>=1.25'
+          check-latest: true
+
+      - name: Determine version
+        id: vars
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "version=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Application
+        env:
+          CGO_ENABLED: 1
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          BINARY="maximus-cli"
+          VERSION="${{ steps.vars.outputs.version }}"
+          go build -ldflags="-X 'main.Version=${VERSION}'" -o "${BINARY}" ./cmd/maximus/
+          tar czf "maximus-cli-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz" "${BINARY}"
+
+      - name: Upload to Forgejo Package Registry
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.vars.outputs.version }}"
+          FILE="maximus-cli-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          curl -s -f \
+            -X PUT \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            --upload-file "${FILE}" \
+            "https://forgejo.internal/api/packages/${{ github.repository_owner }}/generic/maximus-cli/${VERSION}/${FILE}"
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.vars.outputs.version }}"
+          FILE="maximus-cli-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          RELEASE_ID="${{ github.event.release.id }}"
+          curl -s -f \
+            -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @"${FILE}" \
+            "https://forgejo.internal/api/v1/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${FILE}"

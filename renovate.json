@@ -12,5 +12,11 @@
       "groupName": "go non-major dependencies",
       "groupSlug": "go-minor-patch"
     }
-  ]
+  ],
+  "github-actions": {
+    "fileMatch": [
+      "(^|/)\\.forgejo/workflows/.+\\.ya?ml$",
+      "(^|/)\\.github/workflows/.+\\.ya?ml$"
+    ]
+  }
 }

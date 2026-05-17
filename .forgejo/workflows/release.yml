@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Only run when a PR is merged into main (matches common merge commit messages)
+    if: contains(github.event.head_commit.message, 'Merge pull request') || contains(github.event.head_commit.message, '(#')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Calculate next version
+        id: version
+        uses: paulhatch/semantic-version@v5.4.0
+        with:
+          tag_prefix: "v"
+          major_pattern: "(MAJOR)"
+          minor_pattern: "(MINOR)"
+          version_format: "${major}.${minor}.${patch}"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            NOTES=$(git log --pretty=format:"- %s (%h)" HEAD)
+          else
+            NOTES=$(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..HEAD)
+          fi
+          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$NOTES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag and release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION_TAG="v${{ steps.version.outputs.version }}"
+
+          git config user.name "forgejo-actions[bot]"
+          git config user.email "forgejo-actions[bot]@noreply.localhost"
+          git tag -a "${VERSION_TAG}" -m "Release ${VERSION_TAG}"
+          git push origin "${VERSION_TAG}"
+
+          curl -s -f -X POST \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://forgejo.internal/api/v1/repos/${{ github.repository }}/releases" \
+            -d @- <<EOFjson
+          {
+            "tag_name": "${VERSION_TAG}",
+            "name": "${VERSION_TAG}",
+            "body": $(echo '${{ steps.notes.outputs.notes }}' | jq -Rs .),
+            "draft": false,
+            "prerelease": false
+          }
+          EOFjson

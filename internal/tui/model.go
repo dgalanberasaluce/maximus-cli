@@ -22,10 +22,10 @@ const (
 	stateLoading
 	stateResult
 	stateBrewLogs
-	stateUnstaged    // interactive unstaged packages screen
-	stateBrewVersion // installed package version table
-	stateUpgradePkgs // select and upgrade specific packages screen
-	stateHomeMenu    // home sub-menu (Explain / Reload)
+	stateUnstaged     // interactive unstaged packages screen
+	stateBrewVersion  // installed package version table
+	stateUpgradePkgs  // select and upgrade specific packages screen
+	stateHomeMenu     // home sub-menu (Explain / Reload)
 	stateHomeDotfiles // home dotfiles table
 )
 
@@ -130,23 +130,23 @@ type Model struct {
 	versionInputMode bool // true when filter text input is focused
 
 	// Home sub-menu & dotfiles state
-	homeList         list.Model
-	dotfileItems     []db.DotfileEntry // all items (unfiltered)
-	dotfileFiltered  []db.DotfileEntry // items after applying filter
-	dotfileCursor    int               // highlighted row index
-	dotfileFilter    string            // active text filter string
-	dotfileTypeFilter typeFilter        // file/dir/all filter
-	dotfileSortField dotfileSortField  // current sort column
-	dotfileSortAsc   bool              // true = ascending
-	dotfileInput     textinput.Model
-	dotfileInputMode bool              // true when text filter input is focused
-	dotfileToolInput     textinput.Model
-	dotfileToolEditMode  bool          // true when editing a tool description
-	returnState          viewState     // the state to return to from stateResult
-	dotfilePreviewFocused bool          // true when the preview panel has focus
-	dotfileDeleteMode     bool          // true when confirming deletion of a dotfile
+	homeList              list.Model
+	dotfileItems          []db.DotfileEntry // all items (unfiltered)
+	dotfileFiltered       []db.DotfileEntry // items after applying filter
+	dotfileCursor         int               // highlighted row index
+	dotfileFilter         string            // active text filter string
+	dotfileTypeFilter     typeFilter        // file/dir/all filter
+	dotfileSortField      dotfileSortField  // current sort column
+	dotfileSortAsc        bool              // true = ascending
+	dotfileInput          textinput.Model
+	dotfileInputMode      bool // true when text filter input is focused
+	dotfileToolInput      textinput.Model
+	dotfileToolEditMode   bool            // true when editing a tool description
+	returnState           viewState       // the state to return to from stateResult
+	dotfilePreviewFocused bool            // true when the preview panel has focus
+	dotfileDeleteMode     bool            // true when confirming deletion of a dotfile
 	dotfileDeleteInput    textinput.Model // input for typing file name to delete
-	previewViewport       viewport.Model // viewport for scrollable preview pane
+	previewViewport       viewport.Model  // viewport for scrollable preview pane
 }
 
 // styles

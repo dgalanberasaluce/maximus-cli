@@ -43,6 +43,24 @@ func (m Model) View() tea.View {
 	case stateHomeDotfiles:
 		content = m.renderDotfileTable()
 
+	case stateAppsMenu:
+		content = m.appsList.View()
+
+	case stateVSCodeInfo:
+		content = m.renderVSCodeInfo()
+
+	case stateVSCodeMenu:
+		content = m.vscodeList.View()
+
+	case stateVSCodeProfiles:
+		content = m.renderVSCodeProfiles()
+
+	case stateVSCodeHistory:
+		content = m.renderVSCodeHistory()
+
+	case stateVSCodeDeps:
+		content = m.renderVSCodeDeps()
+
 	default: // stateMainMenu
 		content = m.mainList.View()
 	}
@@ -662,5 +680,297 @@ func dotfileTableRows(items []db.DotfileEntry, sortField dotfileSortField, sortA
 		}
 		sb.WriteString(row + "\n")
 	}
+	return sb.String()
+}
+
+// renderVSCodeInfo renders the Visual Studio Code installation summary screen.
+func (m Model) renderVSCodeInfo() string {
+	var sb strings.Builder
+
+	// Header
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  Visual Studio Code — Resumen de Instalación"))
+	sb.WriteString("\n\n")
+
+	// Info Box
+	status := "Instalado"
+	if !m.vscodeSummary.Installed {
+		status = "No detectado"
+	}
+
+	sb.WriteString("  " + headerStyle.Render("●") + " Estado:         " + warningStyle.Render(status) + "\n")
+	sb.WriteString("  " + headerStyle.Render("●") + " Versión:        " + m.vscodeSummary.Version + "\n")
+	if !m.vscodeLastRefreshAt.IsZero() {
+		sb.WriteString("  " + headerStyle.Render("●") + " Último refresh: " + m.vscodeLastRefreshAt.Local().Format("2006-01-02 15:04:05") + "\n")
+	} else {
+		sb.WriteString("  " + headerStyle.Render("●") + " Último refresh: Nunca\n")
+	}
+	sb.WriteString("\n")
+
+	// Paths Configured
+	sb.WriteString(headerStyle.Render("  📂 Paths Configurados") + "\n")
+	sb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
+	for _, p := range m.vscodeSummary.Paths {
+		badge := helpStyle.Render("[ ] Inexistente")
+		if p.Exists {
+			badge = warningStyle.Render("[✓] Configurado")
+		}
+		sb.WriteString(fmt.Sprintf("  %-25s  %s  %s\n", badge, headerStyle.Render(p.Label), p.Path))
+	}
+	sb.WriteString("\n")
+
+	// Footer
+	sb.WriteString(helpStyle.Render("  r refrescar · q o esc para volver"))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+// renderVSCodeProfiles renders the interactive profiles side-by-side view.
+func (m Model) renderVSCodeProfiles() string {
+	var sb strings.Builder
+
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  VSCode — Perfiles Configurados"))
+	if !m.vscodeLastRefreshAt.IsZero() {
+		sb.WriteString(helpStyle.Render("  (último refresh: " + m.vscodeLastRefreshAt.Local().Format("2006-01-02 15:04:05") + ")"))
+	} else {
+		sb.WriteString(helpStyle.Render("  (último refresh: Nunca)"))
+	}
+	sb.WriteString("\n\n")
+
+	if len(m.vscodeProfiles) == 0 {
+		sb.WriteString("  No hay perfiles registrados en la base de datos.\n\n")
+		sb.WriteString(helpStyle.Render("  (presiona q o esc para volver)"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// 1. Render Left Column (Profile List)
+	var leftSb strings.Builder
+	leftSb.WriteString("  " + headerStyle.Render("PERFILES") + "\n")
+	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 26)) + "\n")
+
+	highlighted := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("212"))
+
+	for i, p := range m.vscodeProfiles {
+		name := p.Name
+		if p.IsDefault {
+			name = "[Default] " + p.Name
+		}
+		row := "  " + name
+		if i == m.vscodeProfileCursor {
+			row = highlighted.Render("  " + name)
+		}
+		leftSb.WriteString(row + "\n")
+	}
+
+	// 2. Render Right Column (Viewport Detail Panel)
+	const minTableWidth = 35
+	previewWidth := m.width - minTableWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+
+	borderColor := "240"
+	if m.vscodeProfileFocusPanel {
+		borderColor = "212"
+	}
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Width(previewWidth).
+		Height(m.height - 8)
+
+	previewPanel := previewStyle.Render(m.vscodeProfileVP.View())
+
+	// Combine horizontally!
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, leftSb.String(), "  ", previewPanel)
+	sb.WriteString(combined)
+
+	sb.WriteString("\n\n")
+	if m.vscodeProfileFocusPanel {
+		sb.WriteString(helpStyle.Render("  tab volver a lista · ↑/↓ scroll · esc/q desenfocar panel"))
+	} else {
+		sb.WriteString(helpStyle.Render("  tab enfocar panel · a toggle archivados · ↑/↓ navegar · esc/q volver"))
+	}
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+// renderVSCodeHistory renders the configuration history (refresh log entries that had differences).
+func (m Model) renderVSCodeHistory() string {
+	var sb strings.Builder
+
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  VSCode — Historial de Cambios"))
+	sb.WriteString("\n\n")
+
+	if len(m.vscodeRefreshHistory) == 0 {
+		sb.WriteString("  No hay cambios registrados aún.\n\n")
+		sb.WriteString(helpStyle.Render("  (presiona q o esc para volver)"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// 1. Render Left Column (Dates List)
+	var leftSb strings.Builder
+	leftSb.WriteString("  " + headerStyle.Render("FECHAS") + "\n")
+	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 20)) + "\n")
+
+	highlighted := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("212"))
+
+	for i, entry := range m.vscodeRefreshHistory {
+		date := entry.RefreshedAt.Local().Format("2006-01-02 15:04:05")
+		row := "  ● " + date
+		if i == m.vscodeHistoryCursor {
+			row = highlighted.Render("  ● " + date)
+		}
+		leftSb.WriteString(row + "\n")
+	}
+
+	// 2. Render Right Column (Viewport Detail Panel)
+	const leftWidth = 28
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+
+	borderColor := "240"
+	if m.vscodeHistoryExpanded {
+		borderColor = "212"
+	}
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Width(previewWidth).
+		Height(m.height - 8)
+
+	previewPanel := previewStyle.Render(m.vscodeHistoryDetailVP.View())
+
+	// Combine horizontally!
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, leftSb.String(), "  ", previewPanel)
+	sb.WriteString(combined)
+
+	sb.WriteString("\n\n")
+	if m.vscodeHistoryExpanded {
+		sb.WriteString(helpStyle.Render("  ↑/↓ scroll · esc/q volver a fechas"))
+	} else {
+		sb.WriteString(helpStyle.Render("  espacio ver diferencias · ↑/↓ navegar · esc/q volver al menú"))
+	}
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+// renderVSCodeDeps renders the interactive dependencies view.
+func (m Model) renderVSCodeDeps() string {
+	var sb strings.Builder
+
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  VSCode — Dependencias (Extensiones) Instaladas"))
+	if !m.vscodeLastRefreshAt.IsZero() {
+		sb.WriteString(helpStyle.Render("  (último refresh: " + m.vscodeLastRefreshAt.Local().Format("2006-01-02 15:04:05") + ")"))
+	} else {
+		sb.WriteString(helpStyle.Render("  (último refresh: Nunca)"))
+	}
+	sb.WriteString("\n\n")
+
+	if len(m.vscodeDeps) == 0 {
+		sb.WriteString("  No hay dependencias registradas en la base de datos.\n\n")
+		sb.WriteString(helpStyle.Render("  (presiona q o esc para volver)"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// 1. Render Left Column (Dependency List)
+	var leftSb strings.Builder
+	leftSb.WriteString("  " + headerStyle.Render("DEPENDENCIAS") + "\n")
+	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 32)) + "\n")
+
+	// Render filter input if active or has value
+	if m.vscodeDepsInputMode || m.vscodeDepsInput.Value() != "" {
+		leftSb.WriteString("  " + m.vscodeDepsInput.View() + "\n\n")
+	}
+
+	highlighted := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("212"))
+
+	if len(m.vscodeDepsFiltered) == 0 {
+		leftSb.WriteString("  No matching extensions\n")
+	} else {
+		const chromeHeight = 16 // approximate height used by headers and footers
+		maxRows := m.height - chromeHeight
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		start := 0
+		if len(m.vscodeDepsFiltered) > maxRows {
+			start = m.vscodeDepsCursor - (maxRows / 2)
+			if start < 0 {
+				start = 0
+			}
+			if start+maxRows > len(m.vscodeDepsFiltered) {
+				start = len(m.vscodeDepsFiltered) - maxRows
+			}
+		}
+		end := start + maxRows
+		if end > len(m.vscodeDepsFiltered) {
+			end = len(m.vscodeDepsFiltered)
+		}
+
+		for i := start; i < end; i++ {
+			d := m.vscodeDepsFiltered[i]
+			row := "  " + d.ID
+			if i == m.vscodeDepsCursor {
+				row = highlighted.Render("  " + d.ID)
+			}
+			leftSb.WriteString(row + "\n")
+		}
+	}
+
+	// 2. Render Right Column (Viewport Detail Panel)
+	const leftWidth = 35
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+
+	borderColor := "240"
+	if m.vscodeDepsFocusPanel {
+		borderColor = "212"
+	}
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Width(previewWidth).
+		Height(m.height - 8)
+
+	previewPanel := previewStyle.Render(m.vscodeDepsVP.View())
+
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, leftSb.String(), "  ", previewPanel)
+	sb.WriteString(combined)
+
+	sb.WriteString("\n\n")
+	if m.vscodeDepsFocusPanel {
+		sb.WriteString(helpStyle.Render("  tab volver a lista · ↑/↓ scroll · esc/q desenfocar panel"))
+	} else {
+		viewToggleHelp := "v ver descripción larga"
+		if m.vscodeDepsShowLong {
+			viewToggleHelp = "v ver perfiles"
+		}
+		sb.WriteString(helpStyle.Render("  tab enfocar panel · " + viewToggleHelp + " · / filtrar · ↑/↓ navegar · esc/q volver"))
+	}
+	sb.WriteString("\n")
+
 	return sb.String()
 }

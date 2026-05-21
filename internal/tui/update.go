@@ -1,13 +1,16 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"maximus-cli/internal/apps"
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
 	"maximus-cli/internal/home"
@@ -29,9 +32,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mainList.SetSize(msg.Width, msg.Height)
 		m.homeList.SetSize(msg.Width, msg.Height)
 		m.brewList.SetSize(msg.Width, msg.Height)
+		m.appsList.SetSize(msg.Width, msg.Height)
+		m.vscodeList.SetSize(msg.Width, msg.Height)
 		m.viewport.SetWidth(msg.Width)
 		m.viewport.SetHeight(msg.Height - 6)
 		m = updatePreview(m)
+		m = updateVSCodeProfilePreview(m)
+		m = updateVSCodeHistoryPreview(m)
+		m = updateVSCodeDepsPreview(m)
 
 	case errMsg:
 		m.result = fmt.Sprintf("Error:\n%v", error(msg))
@@ -103,10 +111,347 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateHomeDotfiles
 		return m, nil
 
+	case vscodeSummaryMsg:
+		m.vscodeSummary = msg.summary
+		m.vscodeLastRefreshAt = msg.lastRefresh
+		m.state = stateVSCodeInfo
+		return m, nil
+
+	case vscodeProfilesMsg:
+		m.vscodeProfiles = msg.profiles
+		m.vscodeLastRefreshAt = msg.lastRefresh
+		m.vscodeProfileCursor = 0
+		m.vscodeProfileFocusPanel = false
+		m.state = stateVSCodeProfiles
+		m = updateVSCodeProfilePreview(m)
+		return m, nil
+
+	case vscodeProfilesReloadMsg:
+		m.vscodeProfiles = msg.profiles
+		m.vscodeLastRefreshAt = msg.lastRefresh
+		if msg.prevSelectedLocID != "" {
+			found := false
+			for idx, p := range m.vscodeProfiles {
+				if p.LocationID == msg.prevSelectedLocID {
+					m.vscodeProfileCursor = idx
+					found = true
+					break
+				}
+			}
+			if !found {
+				if m.vscodeProfileCursor >= len(m.vscodeProfiles) {
+					m.vscodeProfileCursor = len(m.vscodeProfiles) - 1
+				}
+				if m.vscodeProfileCursor < 0 {
+					m.vscodeProfileCursor = 0
+				}
+			}
+		} else {
+			if m.vscodeProfileCursor >= len(m.vscodeProfiles) {
+				m.vscodeProfileCursor = len(m.vscodeProfiles) - 1
+			}
+			if m.vscodeProfileCursor < 0 {
+				m.vscodeProfileCursor = 0
+			}
+		}
+		m = updateVSCodeProfilePreview(m)
+		return m, nil
+
+	case vscodeHistoryMsg:
+		m.vscodeRefreshHistory = msg.logs
+		m.vscodeHistoryCursor = 0
+		m.vscodeHistoryExpanded = false
+		m.state = stateVSCodeHistory
+		m = updateVSCodeHistoryPreview(m)
+		return m, nil
+
+	case vscodeDepsMsg:
+		m.vscodeDeps = msg.deps
+		m.vscodeLastRefreshAt = msg.lastRefresh
+		m.vscodeDepsCursor = 0
+		m.vscodeDepsFocusPanel = false
+		m.vscodeDepsInputMode = false
+		m.vscodeDepsShowLong = false
+		m.vscodeDepsFiltered = m.vscodeDeps
+		m.state = stateVSCodeDeps
+		m = updateVSCodeDepsPreview(m)
+		return m, nil
+
+	case vscodeRefreshDoneMsg:
+		// Format a beautiful diff summary
+		var sb strings.Builder
+		sb.WriteString("\n  ")
+		sb.WriteString(headerStyle.Render("Resumen de Refresco de VSCode"))
+		sb.WriteString("\n\n")
+
+		if !msg.diff.HasAnyChange {
+			sb.WriteString("  ✓ Todo está al día. Sin diferencias respecto al refresco anterior.\n")
+		} else {
+			sb.WriteString("  " + warningStyle.Render("Cambios detectados desde el último refresco:"))
+			sb.WriteString("\n\n")
+
+			if msg.diff.VersionChanged {
+				sb.WriteString(fmt.Sprintf("  - Versión: %s → %s\n", msg.diff.OldVersion, msg.diff.NewVersion))
+			} else {
+				sb.WriteString(fmt.Sprintf("  - Versión: %s (Sin cambios)\n", msg.diff.NewVersion))
+			}
+
+			if len(msg.diff.PathsAdded) > 0 {
+				sb.WriteString(fmt.Sprintf("  - Paths añadidos: %s\n", strings.Join(msg.diff.PathsAdded, ", ")))
+			}
+			if len(msg.diff.PathsRemoved) > 0 {
+				sb.WriteString(fmt.Sprintf("  - Paths eliminados: %s\n", strings.Join(msg.diff.PathsRemoved, ", ")))
+			}
+			if len(msg.diff.ProfilesAdded) > 0 {
+				sb.WriteString(fmt.Sprintf("  - Perfiles añadidos: %s\n", strings.Join(msg.diff.ProfilesAdded, ", ")))
+			}
+			if len(msg.diff.ProfilesRemoved) > 0 {
+				sb.WriteString(fmt.Sprintf("  - Perfiles eliminados: %s\n", strings.Join(msg.diff.ProfilesRemoved, ", ")))
+			}
+			if len(msg.diff.ExtChanges) > 0 {
+				sb.WriteString("  - Extensiones:\n")
+				for _, line := range msg.diff.ExtChanges {
+					sb.WriteString(fmt.Sprintf("    * %s\n", line))
+				}
+			}
+		}
+
+		sb.WriteString("\n")
+		sb.WriteString("  ✓ Refresco completado. Presiona q para regresar.")
+		sb.WriteString("\n")
+
+		m.result = sb.String()
+		m.state = stateResult
+		m.viewport.SetContent(m.formatResult(sb.String()))
+		m.viewport.GotoTop()
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		}
+
+		// --- VSCode Menu keys ---
+		if m.state == stateVSCodeMenu {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateAppsMenu
+				return m, nil
+			case "enter":
+				if i, ok := m.vscodeList.SelectedItem().(menuItem); ok {
+					return m.dispatchVSCodeCmd(i.title)
+				}
+			}
+			m.vscodeList, cmd = m.vscodeList.Update(msg)
+			return m, cmd
+		}
+
+		// --- VSCode Summary keys ---
+		if m.state == stateVSCodeInfo {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateVSCodeMenu
+				return m, nil
+			case "r":
+				newM, refreshCmd := m.dispatchVSCodeCmd("Refresh")
+				if typedM, ok := newM.(Model); ok {
+					typedM.returnState = stateVSCodeInfo
+					return typedM, refreshCmd
+				}
+				return newM, refreshCmd
+			}
+			return m, nil
+		}
+
+		// --- VSCode Profiles keys ---
+		if m.state == stateVSCodeProfiles {
+			n := len(m.vscodeProfiles)
+			var cmd tea.Cmd
+			switch msg.String() {
+			case "esc", "q":
+				if m.vscodeProfileFocusPanel {
+					m.vscodeProfileFocusPanel = false
+					return m, nil
+				}
+				m.state = stateVSCodeMenu
+				return m, nil
+			case "tab":
+				m.vscodeProfileFocusPanel = !m.vscodeProfileFocusPanel
+				return m, nil
+			case "up", "k":
+				if m.vscodeProfileFocusPanel {
+					m.vscodeProfileVP, cmd = m.vscodeProfileVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeProfileCursor > 0 {
+						m.vscodeProfileCursor--
+						m = updateVSCodeProfilePreview(m)
+					}
+				}
+			case "down", "j":
+				if m.vscodeProfileFocusPanel {
+					m.vscodeProfileVP, cmd = m.vscodeProfileVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeProfileCursor < n-1 {
+						m.vscodeProfileCursor++
+						m = updateVSCodeProfilePreview(m)
+					}
+				}
+			case "a":
+				m.vscodeShowArchived = !m.vscodeShowArchived
+				database := m.database
+				showArchived := m.vscodeShowArchived
+				var selectedLocID string
+				if m.vscodeProfileCursor >= 0 && m.vscodeProfileCursor < len(m.vscodeProfiles) {
+					selectedLocID = m.vscodeProfiles[m.vscodeProfileCursor].LocationID
+				}
+				bgCmd := func() tea.Msg {
+					profs, err := apps.LoadVSCodeProfiles(database, showArchived)
+					if err != nil {
+						return errMsg(err)
+					}
+					ts, _ := database.GetLastVSCodeRefreshAt()
+					return vscodeProfilesReloadMsg{profiles: profs, lastRefresh: ts, prevSelectedLocID: selectedLocID}
+				}
+				return m, bgCmd
+			default:
+				if m.vscodeProfileFocusPanel {
+					m.vscodeProfileVP, cmd = m.vscodeProfileVP.Update(msg)
+					return m, cmd
+				}
+			}
+			return m, nil
+		}
+
+		// --- VSCode History keys ---
+		if m.state == stateVSCodeHistory {
+			n := len(m.vscodeRefreshHistory)
+			var cmd tea.Cmd
+			switch msg.String() {
+			case "esc", "q":
+				if m.vscodeHistoryExpanded {
+					m.vscodeHistoryExpanded = false
+					return m, nil
+				}
+				m.state = stateVSCodeMenu
+				return m, nil
+			case "space":
+				if n > 0 {
+					m.vscodeHistoryExpanded = !m.vscodeHistoryExpanded
+				}
+				return m, nil
+			case "up", "k":
+				if m.vscodeHistoryExpanded {
+					m.vscodeHistoryDetailVP, cmd = m.vscodeHistoryDetailVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeHistoryCursor > 0 {
+						m.vscodeHistoryCursor--
+						m = updateVSCodeHistoryPreview(m)
+					}
+				}
+			case "down", "j":
+				if m.vscodeHistoryExpanded {
+					m.vscodeHistoryDetailVP, cmd = m.vscodeHistoryDetailVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeHistoryCursor < n-1 {
+						m.vscodeHistoryCursor++
+						m = updateVSCodeHistoryPreview(m)
+					}
+				}
+			default:
+				if m.vscodeHistoryExpanded {
+					m.vscodeHistoryDetailVP, cmd = m.vscodeHistoryDetailVP.Update(msg)
+					return m, cmd
+				}
+			}
+			return m, nil
+		}
+
+		// --- VSCode Dependencies keys ---
+		if m.state == stateVSCodeDeps {
+			n := len(m.vscodeDepsFiltered)
+			var cmd tea.Cmd
+			if m.vscodeDepsInputMode {
+				switch msg.String() {
+				case "enter", "esc":
+					m.vscodeDepsInputMode = false
+					m.vscodeDepsInput.Blur()
+					return m, nil
+				default:
+					m.vscodeDepsInput, cmd = m.vscodeDepsInput.Update(msg)
+					m.vscodeDepsFiltered = nil
+					filter := strings.ToLower(m.vscodeDepsInput.Value())
+					for _, d := range m.vscodeDeps {
+						if strings.Contains(strings.ToLower(d.ID), filter) {
+							m.vscodeDepsFiltered = append(m.vscodeDepsFiltered, d)
+						}
+					}
+					if m.vscodeDepsCursor >= len(m.vscodeDepsFiltered) {
+						m.vscodeDepsCursor = len(m.vscodeDepsFiltered) - 1
+					}
+					if m.vscodeDepsCursor < 0 {
+						m.vscodeDepsCursor = 0
+					}
+					m = updateVSCodeDepsPreview(m)
+					return m, cmd
+				}
+			}
+
+			switch msg.String() {
+			case "esc", "q":
+				if m.vscodeDepsFocusPanel {
+					m.vscodeDepsFocusPanel = false
+					return m, nil
+				}
+				m.state = stateVSCodeMenu
+				return m, nil
+			case "/":
+				if !m.vscodeDepsFocusPanel {
+					m.vscodeDepsInputMode = true
+					m.vscodeDepsInput.Focus()
+					m.vscodeDepsInput.SetValue("")
+					return m, nil
+				}
+			case "v":
+				if !m.vscodeDepsFocusPanel {
+					m.vscodeDepsShowLong = !m.vscodeDepsShowLong
+					m = updateVSCodeDepsPreview(m)
+					return m, nil
+				}
+			case "tab":
+				m.vscodeDepsFocusPanel = !m.vscodeDepsFocusPanel
+				return m, nil
+			case "up", "k":
+				if m.vscodeDepsFocusPanel {
+					m.vscodeDepsVP, cmd = m.vscodeDepsVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeDepsCursor > 0 {
+						m.vscodeDepsCursor--
+						m = updateVSCodeDepsPreview(m)
+					}
+				}
+			case "down", "j":
+				if m.vscodeDepsFocusPanel {
+					m.vscodeDepsVP, cmd = m.vscodeDepsVP.Update(msg)
+					return m, cmd
+				} else {
+					if m.vscodeDepsCursor < n-1 {
+						m.vscodeDepsCursor++
+						m = updateVSCodeDepsPreview(m)
+					}
+				}
+			default:
+				if m.vscodeDepsFocusPanel {
+					m.vscodeDepsVP, cmd = m.vscodeDepsVP.Update(msg)
+					return m, cmd
+				}
+			}
+			return m, nil
 		}
 
 		// --- Dotfiles table logic ---
@@ -529,11 +874,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.result = ""
 				m.state = m.returnState
 				return m, nil
-			case stateBrewMenu, stateHomeMenu:
+			case stateBrewMenu, stateHomeMenu, stateAppsMenu:
 				m.state = stateMainMenu
 				return m, nil
 			case stateHomeDotfiles:
 				m.state = stateHomeMenu
+				return m, nil
+			case stateVSCodeInfo, stateVSCodeMenu, stateVSCodeProfiles, stateVSCodeHistory:
+				m.state = stateVSCodeMenu
 				return m, nil
 			}
 		case "enter":
@@ -548,6 +896,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.homeList.SetSize(m.width, m.height)
 						m.state = stateHomeMenu
 						return m, nil
+					} else if i.title == "Applications" {
+						m.appsList.SetSize(m.width, m.height)
+						m.state = stateAppsMenu
+						return m, nil
 					}
 				}
 			case stateBrewMenu:
@@ -557,6 +909,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stateHomeMenu:
 				if i, ok := m.homeList.SelectedItem().(menuItem); ok {
 					return m.dispatchHomeCmd(i.title)
+				}
+			case stateAppsMenu:
+				if i, ok := m.appsList.SelectedItem().(menuItem); ok {
+					return m.dispatchAppsCmd(i.title)
+				}
+			case stateVSCodeMenu:
+				if i, ok := m.vscodeList.SelectedItem().(menuItem); ok {
+					return m.dispatchVSCodeCmd(i.title)
 				}
 			}
 		}
@@ -572,6 +932,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	case stateBrewMenu:
 		m.brewList, cmd = m.brewList.Update(msg)
+		cmds = append(cmds, cmd)
+	case stateAppsMenu:
+		m.appsList, cmd = m.appsList.Update(msg)
+		cmds = append(cmds, cmd)
+	case stateVSCodeMenu:
+		m.vscodeList, cmd = m.vscodeList.Update(msg)
+		cmds = append(cmds, cmd)
+	case stateVSCodeProfiles:
+		m.vscodeProfileVP, cmd = m.vscodeProfileVP.Update(msg)
 		cmds = append(cmds, cmd)
 	case stateLoading:
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -1040,5 +1409,347 @@ func updatePreview(m Model) Model {
 	wrapped := WordWrap(previewText, previewWidth-4)
 	m.previewViewport.SetContent(wrapped)
 	m.previewViewport.GotoTop()
+	return m
+}
+
+// vscodeInfoMsg carries the gathered VSCode summary back to the model.
+type vscodeInfoMsg struct {
+	summary apps.VSCodeSummary
+}
+
+// dispatchAppsCmd handles menu selection in the Aplicaciones submenu.
+func (m Model) dispatchAppsCmd(title string) (tea.Model, tea.Cmd) {
+	m.returnState = stateAppsMenu
+
+	switch title {
+	case "VSCode":
+		m.state = stateVSCodeMenu
+		m.vscodeList.SetSize(m.width, m.height)
+		return m, nil
+
+	default:
+		m.result = fmt.Sprintf("Unknown application command: %q", title)
+		m.state = stateResult
+		return m, nil
+	}
+}
+
+// Msg structures for VSCode
+type vscodeSummaryMsg struct {
+	summary     apps.VSCodeSummary
+	lastRefresh time.Time
+}
+
+type vscodeProfilesMsg struct {
+	profiles    []apps.VSCodeProfile
+	lastRefresh time.Time
+}
+
+type vscodeProfilesReloadMsg struct {
+	profiles          []apps.VSCodeProfile
+	lastRefresh       time.Time
+	prevSelectedLocID string
+}
+
+type vscodeHistoryMsg struct {
+	logs []db.VSCodeRefreshLogRow
+}
+
+type vscodeRefreshDoneMsg struct {
+	diff apps.VSCodeDiff
+}
+
+type vscodeDepsMsg struct {
+	deps        []apps.VSCodeExtAgg
+	lastRefresh time.Time
+}
+
+// dispatchVSCodeCmd handles choices inside the VSCode submenu
+func (m Model) dispatchVSCodeCmd(title string) (tea.Model, tea.Cmd) {
+	database := m.database
+	m.returnState = stateVSCodeMenu
+
+	switch title {
+	case "Summary":
+		m.state = stateLoading
+		m.loadingText = "Loading VSCode summary..."
+		bgCmd := func() tea.Msg {
+			ts, _ := database.GetLastVSCodeRefreshAt()
+			summary, err := apps.LoadVSCodeSummary(database)
+			if err != nil {
+				// Auto-refresh if empty
+				_, err = apps.ScanVSCode(database)
+				if err != nil {
+					return errMsg(err)
+				}
+				summary, err = apps.LoadVSCodeSummary(database)
+				if err != nil {
+					return errMsg(err)
+				}
+				ts, _ = database.GetLastVSCodeRefreshAt()
+			}
+			return vscodeSummaryMsg{summary: summary, lastRefresh: ts}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "Profiles":
+		m.state = stateLoading
+		m.loadingText = "Loading VSCode profiles..."
+		bgCmd := func() tea.Msg {
+			ts, _ := database.GetLastVSCodeRefreshAt()
+			profs, err := apps.LoadVSCodeProfiles(database, m.vscodeShowArchived)
+			if err != nil || len(profs) == 0 {
+				// Auto-refresh if empty
+				_, err = apps.ScanVSCode(database)
+				if err != nil {
+					return errMsg(err)
+				}
+				profs, err = apps.LoadVSCodeProfiles(database, m.vscodeShowArchived)
+				if err != nil {
+					return errMsg(err)
+				}
+				ts, _ = database.GetLastVSCodeRefreshAt()
+			}
+			return vscodeProfilesMsg{profiles: profs, lastRefresh: ts}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "Dependencies":
+		m.state = stateLoading
+		m.loadingText = "Loading VSCode dependencies..."
+		bgCmd := func() tea.Msg {
+			deps, err := apps.LoadVSCodeDependencies(database)
+			if err != nil {
+				return errMsg(err)
+			}
+			ts, _ := database.GetLastVSCodeRefreshAt()
+			return vscodeDepsMsg{deps: deps, lastRefresh: ts}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "History":
+		m.state = stateLoading
+		m.loadingText = "Loading VSCode refresh history..."
+		bgCmd := func() tea.Msg {
+			logs, err := database.GetVSCodeRefreshLogs(true, 100, 0)
+			if err != nil {
+				return errMsg(err)
+			}
+			return vscodeHistoryMsg{logs: logs}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	case "Refresh":
+		m.state = stateLoading
+		m.loadingText = "Se están refrescando los datos..."
+		bgCmd := func() tea.Msg {
+			diff, err := apps.ScanVSCode(database)
+			if err != nil {
+				return errMsg(err)
+			}
+			return vscodeRefreshDoneMsg{diff: diff}
+		}
+		return m, tea.Batch(m.spinner.Tick, bgCmd)
+
+	default:
+		m.result = fmt.Sprintf("Unknown VSCode command: %q", title)
+		m.state = stateResult
+		return m, nil
+	}
+}
+
+func updateVSCodeProfilePreview(m Model) Model {
+	if len(m.vscodeProfiles) == 0 || m.vscodeProfileCursor < 0 || m.vscodeProfileCursor >= len(m.vscodeProfiles) {
+		m.vscodeProfileVP.SetContent("")
+		return m
+	}
+
+	p := m.vscodeProfiles[m.vscodeProfileCursor]
+	var sb strings.Builder
+
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("PERFIL: " + p.Name))
+	sb.WriteString("\n\n")
+
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Ruta de instalación:"))
+	sb.WriteString("\n" + p.ProfilePath + "\n\n")
+
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Última modificación:"))
+	if !p.DirMtime.IsZero() {
+		sb.WriteString("\n" + p.DirMtime.Local().Format("2006-01-02 15:04:05") + "\n\n")
+	} else {
+		sb.WriteString("\nNo disponible (no existe en disco)\n\n")
+	}
+
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Proyectos asociados:"))
+	if len(p.Projects) == 0 {
+		sb.WriteString("\nNinguno\n\n")
+	} else {
+		sb.WriteString("\n")
+		for _, proj := range p.Projects {
+			if proj.ExistsOnDisk {
+				sb.WriteString("  ✓ " + proj.Path + "\n")
+			} else {
+				sb.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("[Arch] ") + proj.Path + "\n")
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Dependencias (Extensiones):"))
+	if len(p.Extensions) == 0 {
+		sb.WriteString("\nNinguna\n")
+	} else {
+		sb.WriteString("\n")
+		for _, ext := range p.Extensions {
+			sb.WriteString(fmt.Sprintf("  • %s (%s)\n", ext.ID, ext.Version))
+		}
+	}
+
+	const minTableWidth = 35
+	previewWidth := m.width - minTableWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+	m.vscodeProfileVP.SetWidth(previewWidth - 2)
+	m.vscodeProfileVP.SetHeight(m.height - 12)
+
+	wrapped := WordWrap(sb.String(), previewWidth-4)
+	m.vscodeProfileVP.SetContent(wrapped)
+	m.vscodeProfileVP.GotoTop()
+
+	return m
+}
+
+func updateVSCodeHistoryPreview(m Model) Model {
+	if len(m.vscodeRefreshHistory) == 0 || m.vscodeHistoryCursor < 0 || m.vscodeHistoryCursor >= len(m.vscodeRefreshHistory) {
+		m.vscodeHistoryDetailVP.SetContent("")
+		return m
+	}
+
+	entry := m.vscodeRefreshHistory[m.vscodeHistoryCursor]
+	var sb strings.Builder
+
+	date := entry.RefreshedAt.Local().Format("2006-01-02 15:04:05")
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("CAMBIOS EN REFRESH: " + date))
+	sb.WriteString("\n\n")
+
+	var diff apps.VSCodeDiff
+	if err := json.Unmarshal([]byte(entry.DiffJSON), &diff); err == nil {
+		if !diff.HasAnyChange {
+			sb.WriteString("Sin cambios detectados en este refresco.\n")
+		} else {
+			if diff.VersionChanged {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Render("• Versión de VSCode:") + "\n")
+				sb.WriteString(fmt.Sprintf("  %s → %s\n\n", diff.OldVersion, diff.NewVersion))
+			}
+			if len(diff.PathsAdded) > 0 {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("34")).Render("• Paths Añadidos:") + "\n")
+				for _, p := range diff.PathsAdded {
+					sb.WriteString(fmt.Sprintf("  + %s\n", p))
+				}
+				sb.WriteString("\n")
+			}
+			if len(diff.PathsRemoved) > 0 {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("• Paths Eliminados:") + "\n")
+				for _, p := range diff.PathsRemoved {
+					sb.WriteString(fmt.Sprintf("  - %s\n", p))
+				}
+				sb.WriteString("\n")
+			}
+			if len(diff.ProfilesAdded) > 0 {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("34")).Render("• Perfiles Añadidos:") + "\n")
+				for _, p := range diff.ProfilesAdded {
+					sb.WriteString(fmt.Sprintf("  + %s\n", p))
+				}
+				sb.WriteString("\n")
+			}
+			if len(diff.ProfilesRemoved) > 0 {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("• Perfiles Eliminados:") + "\n")
+				for _, p := range diff.ProfilesRemoved {
+					sb.WriteString(fmt.Sprintf("  - %s\n", p))
+				}
+				sb.WriteString("\n")
+			}
+			if len(diff.ExtChanges) > 0 {
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("• Cambio en Extensiones:") + "\n")
+				for _, line := range diff.ExtChanges {
+					sb.WriteString(fmt.Sprintf("  * %s\n", line))
+				}
+				sb.WriteString("\n")
+			}
+		}
+	} else {
+		sb.WriteString("Error decodificando diferencias.\n")
+	}
+
+	const leftWidth = 28
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+	m.vscodeHistoryDetailVP.SetWidth(previewWidth - 2)
+	m.vscodeHistoryDetailVP.SetHeight(m.height - 12)
+
+	wrapped := WordWrap(sb.String(), previewWidth-4)
+	m.vscodeHistoryDetailVP.SetContent(wrapped)
+	m.vscodeHistoryDetailVP.GotoTop()
+
+	return m
+}
+
+func updateVSCodeDepsPreview(m Model) Model {
+	if len(m.vscodeDepsFiltered) == 0 || m.vscodeDepsCursor < 0 || m.vscodeDepsCursor >= len(m.vscodeDepsFiltered) {
+		m.vscodeDepsVP.SetContent("")
+		return m
+	}
+
+	dep := m.vscodeDepsFiltered[m.vscodeDepsCursor]
+	var sb strings.Builder
+
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("EXTENSION: " + dep.ID))
+	sb.WriteString("\n")
+	if dep.Description != "" {
+		sb.WriteString(lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("244")).Render(dep.Description))
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+
+	if m.vscodeDepsShowLong {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render("📄 DESCRIPCIÓN OFICIAL (README):"))
+		sb.WriteString("\n\n")
+		if dep.LongDescription != "" {
+			sb.WriteString(dep.LongDescription)
+		} else {
+			sb.WriteString(lipgloss.NewStyle().Italic(true).Foreground(lipgloss.Color("240")).Render("No official README description fetched from Marketplace."))
+		}
+	} else {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Perfiles que la tienen instalada:"))
+		sb.WriteString("\n\n")
+
+		for _, inst := range dep.Installs {
+			sb.WriteString("  " + headerStyle.Render("●") + " " + warningStyle.Render(inst.ProfileName) + "\n")
+			sb.WriteString("    Versión: " + inst.Version + "\n")
+			if !inst.InstalledAt.IsZero() {
+				sb.WriteString("    Instalada el: " + inst.InstalledAt.Local().Format("2006-01-02 15:04:05") + "\n")
+			}
+			if inst.InstallPath != "" {
+				sb.WriteString("    Path: " + inst.InstallPath + "\n")
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	const leftWidth = 35
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+	m.vscodeDepsVP.SetWidth(previewWidth - 2)
+	m.vscodeDepsVP.SetHeight(m.height - 12)
+
+	wrapped := WordWrap(sb.String(), previewWidth-4)
+	m.vscodeDepsVP.SetContent(wrapped)
+	m.vscodeDepsVP.GotoTop()
+
 	return m
 }

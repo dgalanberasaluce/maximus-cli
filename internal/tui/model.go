@@ -2,8 +2,10 @@
 package tui
 
 import (
+	"maximus-cli/internal/apps"
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
+	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
@@ -27,6 +29,12 @@ const (
 	stateUpgradePkgs  // select and upgrade specific packages screen
 	stateHomeMenu     // home sub-menu (Explain / Reload)
 	stateHomeDotfiles // home dotfiles table
+	stateAppsMenu     // apps sub-menu
+	stateVSCodeInfo   // vscode installation summary screen
+	stateVSCodeMenu   // vscode sub-menu (Summary/Profiles/History/Refresh)
+	stateVSCodeProfiles // vscode profiles interactive panel
+	stateVSCodeHistory  // vscode refresh history diffs panel
+	stateVSCodeDeps     // vscode aggregated dependencies screen
 )
 
 // versionSortField identifies which column is used for sorting the version table.
@@ -147,6 +155,29 @@ type Model struct {
 	dotfileDeleteMode     bool            // true when confirming deletion of a dotfile
 	dotfileDeleteInput    textinput.Model // input for typing file name to delete
 	previewViewport       viewport.Model  // viewport for scrollable preview pane
+
+	// Apps state
+	appsList                list.Model
+	vscodeSummary           apps.VSCodeSummary
+	vscodeList              list.Model
+	vscodeProfiles          []apps.VSCodeProfile
+	vscodeProfileCursor     int
+	vscodeProfileVP         viewport.Model
+	vscodeProfileFocusPanel bool
+	vscodeShowArchived      bool
+	vscodeRefreshHistory    []db.VSCodeRefreshLogRow
+	vscodeHistoryCursor     int
+	vscodeHistoryExpanded   bool
+	vscodeHistoryDetailVP   viewport.Model
+	vscodeLastRefreshAt     time.Time
+	vscodeDeps              []apps.VSCodeExtAgg
+	vscodeDepsFiltered      []apps.VSCodeExtAgg
+	vscodeDepsCursor        int
+	vscodeDepsFocusPanel    bool
+	vscodeDepsVP            viewport.Model
+	vscodeDepsInput         textinput.Model
+	vscodeDepsInputMode     bool
+	vscodeDepsShowLong      bool
 }
 
 // styles
@@ -176,10 +207,29 @@ func New(brewfilePath string, database *db.DB) Model {
 	mainItems := []list.Item{
 		menuItem{title: "Home", desc: "Manage and explain dotfiles in $HOME"},
 		menuItem{title: "Brew", desc: "Manage Homebrew packages"},
+		menuItem{title: "Applications", desc: "Manage and view configurations of applications (VSCode, etc.)"},
 	}
 	ml := list.New(mainItems, list.NewDefaultDelegate(), 0, 0)
 	ml.Title = "Maximus CLI"
 	ml.SetShowStatusBar(false)
+
+	appsItems := []list.Item{
+		menuItem{title: "VSCode", desc: "Manage and view configurations of VSCode"},
+	}
+	al := list.New(appsItems, list.NewDefaultDelegate(), 0, 0)
+	al.Title = "Applications"
+	al.SetShowStatusBar(false)
+
+	vscodeItems := []list.Item{
+		menuItem{title: "Summary", desc: "Show installation summary"},
+		menuItem{title: "Profiles", desc: "Manage and view interactive profiles"},
+		menuItem{title: "Dependencies", desc: "View all installed extensions and their profiles"},
+		menuItem{title: "History", desc: "View history of changes"},
+		menuItem{title: "Refresh", desc: "Scan and refresh database data"},
+	}
+	vl := list.New(vscodeItems, list.NewDefaultDelegate(), 0, 0)
+	vl.Title = "VSCode Options"
+	vl.SetShowStatusBar(false)
 
 	homeItems := []list.Item{
 		menuItem{title: "Explain", desc: "Show dotfiles/folders table in $HOME with tool explanations"},
@@ -239,6 +289,11 @@ func New(brewfilePath string, database *db.DB) Model {
 
 	pv := viewport.New()
 
+	vdi := textinput.New()
+	vdi.Placeholder = "filter extensions..."
+	vdi.CharLimit = 60
+	vdi.SetWidth(30)
+
 	return Model{
 		state:                 stateMainMenu,
 		returnState:           stateMainMenu,
@@ -261,6 +316,13 @@ func New(brewfilePath string, database *db.DB) Model {
 		previewViewport:       pv,
 		dotfilePreviewFocused: false,
 		dotfileDeleteMode:     false,
+		appsList:              al,
+		vscodeList:            vl,
+		vscodeShowArchived:    false,
+		vscodeProfileVP:       viewport.New(),
+		vscodeHistoryDetailVP: viewport.New(),
+		vscodeDepsVP:          viewport.New(),
+		vscodeDepsInput:       vdi,
 	}
 }
 

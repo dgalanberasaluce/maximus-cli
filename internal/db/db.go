@@ -90,6 +90,10 @@ func (d *DB) migrate() error {
 	// Dynamic migration for existing databases:
 	_, _ = d.conn.Exec(`ALTER TABLE dotfiles ADD COLUMN tool_manual BOOLEAN NOT NULL DEFAULT 0`)
 
+	if err := d.migrateVSCode(); err != nil {
+		return err
+	}
+
 	return nil
 }
 

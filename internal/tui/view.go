@@ -43,6 +43,9 @@ func (m Model) View() tea.View {
 	case stateHomeDotfiles:
 		content = m.renderDotfileTable()
 
+	case stateBrewServices:
+		content = m.renderBrewServices()
+
 	case stateAppsMenu:
 		content = m.appsList.View()
 
@@ -683,6 +686,246 @@ func dotfileTableRows(items []db.DotfileEntry, sortField dotfileSortField, sortA
 	return sb.String()
 }
 
+// renderBrewServices renders the Homebrew services panel layout (3 panels).
+func (m Model) renderBrewServices() string {
+	// Total height for content
+	contentH := m.height - 5
+	if contentH < 10 {
+		contentH = 10
+	}
+
+	leftColW := 22
+	rightColW := m.width - leftColW - 4
+	if rightColW < 20 {
+		rightColW = 20
+	}
+
+	infoH := (contentH * 60) / 100
+	logsH := contentH - infoH - 2
+	if infoH < 3 {
+		infoH = 3
+	}
+	if logsH < 3 {
+		logsH = 3
+	}
+
+	// Border colors based on active focused panel (0=list, 1=info, 2=logs)
+	listBorderColor := "240"
+	infoBorderColor := "240"
+	logsBorderColor := "240"
+
+	switch m.servicesFocusPanel {
+	case 0:
+		listBorderColor = "212" // Highlight active focus
+	case 1:
+		infoBorderColor = "212"
+	case 2:
+		logsBorderColor = "212"
+	}
+
+	// 1. Render Left Services List
+	var leftSb strings.Builder
+	for i, s := range m.servicesItems {
+		statusBullet := "○"
+		var statusCol string
+		if s.Status == "started" {
+			statusBullet = "●"
+			statusCol = "42" // Green
+		} else if s.Status == "stopped" {
+			statusBullet = "●"
+			statusCol = "196" // Red
+		} else {
+			statusCol = "243" // Gray
+		}
+
+		bulletStr := lipgloss.NewStyle().Foreground(lipgloss.Color(statusCol)).Render(statusBullet)
+
+		// Truncate name to fit inside the narrow list column
+		// Content area width is leftColW - 4 (18)
+		maxNameW := 12
+		rowText := s.Name
+		if len(rowText) > maxNameW {
+			rowText = rowText[:maxNameW-1] + "…"
+		}
+
+		var row string
+		if i == m.servicesCursor {
+			row = fmt.Sprintf("▶ %s %s", bulletStr, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render(rowText))
+		} else {
+			row = fmt.Sprintf("  %s %s", bulletStr, rowText)
+		}
+		leftSb.WriteString(row + "\n")
+	}
+
+	if len(m.servicesItems) == 0 {
+		leftSb.WriteString("  No services\n")
+	}
+
+	// Pad left content with empty lines to match exactly contentH - 2 (inside borders)
+	lines := strings.Split(leftSb.String(), "\n")
+	// Split trailing newline creates a trailing empty string, remove it if empty
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for len(lines) < contentH-2 {
+		lines = append(lines, "")
+	}
+	leftBody := strings.Join(lines[:contentH-2], "\n")
+
+	leftPanelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(listBorderColor)).
+		Padding(0, 1).
+		Width(leftColW).
+		Height(contentH)
+
+	leftPanel := leftPanelStyle.Render(leftBody)
+
+	// 2. Render Right Info Panel
+	infoPanelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(infoBorderColor)).
+		Padding(0, 1).
+		Width(rightColW).
+		Height(infoH)
+
+	infoHeading := headerStyle.Render("  DETALLES DE SERVICIO") + "\n"
+	infoPanel := infoPanelStyle.Render(infoHeading + m.servicesInfoVP.View())
+
+	// 3. Render Right Logs Panel
+	logsPanelStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(logsBorderColor)).
+		Padding(0, 1).
+		Width(rightColW).
+		Height(logsH)
+
+	// Logs panel heading with streaming indicator and active filter
+	var logsHeadingParts strings.Builder
+	logsHeadingParts.WriteString("  LOGS DEL SERVICIO")
+	if m.servicesLogsStreaming {
+		liveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+		logsHeadingParts.WriteString("  " + liveStyle.Render("● LIVE"))
+	} else {
+		logsHeadingParts.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("■ PAUSED"))
+	}
+	if m.servicesLogsFilter != "" {
+		filterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		logsHeadingParts.WriteString("  " + filterStyle.Render(fmt.Sprintf("[/%s]", m.servicesLogsFilter)))
+	}
+	logsHeading := headerStyle.Render(logsHeadingParts.String()) + "\n"
+
+	var logsBody string
+	if m.servicesLogsFilterMode {
+		// Show filter input at the bottom of the logs panel content
+		filterPrompt := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("212")).
+			Bold(true).
+			Render("Filter: ") + m.servicesLogsInput.View()
+		logsBody = logsHeading + m.servicesLogsVP.View() + "\n" + filterPrompt
+	} else {
+		logsBody = logsHeading + m.servicesLogsVP.View()
+	}
+	logsPanel := logsPanelStyle.Render(logsBody)
+
+	// Combine right panels vertically
+	rightSide := lipgloss.JoinVertical(lipgloss.Left, infoPanel, logsPanel)
+
+	// Combine left list panel and right panels side-by-side
+	mainBody := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, "  ", rightSide)
+
+	var sb strings.Builder
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  Brew Services"))
+	sb.WriteString("\n\n")
+	sb.WriteString(mainBody)
+	sb.WriteString("\n\n")
+
+	var helpText string
+	switch m.servicesFocusPanel {
+	case 1:
+		helpText = "  tab foco · ↑/↓ scroll info · esc/q volver"
+	case 2:
+		helpText = "  tab foco · ↑/↓ scroll · g inicio · G final · p pausar/reanudar · / filtrar · esc/q volver"
+	default:
+		helpText = "  tab foco · ↑/↓ navegar · s start · x stop · r restart · K kill · Z tamaño log · R refresh · q volver"
+	}
+	sb.WriteString(helpStyle.Render(helpText) + "\n")
+
+	result := sb.String()
+
+	// Confirmation popup overlay
+	if m.servicesConfirmMode && len(m.servicesItems) > 0 {
+		svc := m.servicesItems[m.servicesCursor]
+		actionColors := map[string]string{
+			"start":   "42",
+			"stop":    "196",
+			"restart": "214",
+			"kill":    "196",
+		}
+		actionEmojis := map[string]string{
+			"start":   "▶",
+			"stop":    "■",
+			"restart": "↺",
+			"kill":    "✕",
+		}
+		col := actionColors[m.servicesConfirmAction]
+		if col == "" {
+			col = "212"
+		}
+		emoji := actionEmojis[m.servicesConfirmAction]
+
+		actionStyled := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(col)).
+			Bold(true).
+			Render(fmt.Sprintf("%s %s", emoji, strings.ToUpper(m.servicesConfirmAction)))
+		svcStyled := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("212")).
+			Bold(true).
+			Render(svc.Name)
+
+		popupContent := fmt.Sprintf(
+			"\n  %s  %s\n\n  ¿Confirmar %s de %s?\n\n  [enter / y] Confirmar    [n / esc] Cancelar\n",
+			actionStyled,
+			svcStyled,
+			m.servicesConfirmAction,
+			svc.Name,
+		)
+
+		popup := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(col)).
+			Padding(0, 2).
+			Width(52).
+			Render(popupContent)
+
+		// Overlay the popup centered in the view
+		totalWidth := m.width
+		popupWidth := 56 // border + padding
+		popupLines := strings.Split(popup, "\n")
+		leftPad := (totalWidth - popupWidth) / 2
+		if leftPad < 0 {
+			leftPad = 0
+		}
+		padding := strings.Repeat(" ", leftPad)
+
+		resultLines := strings.Split(result, "\n")
+		startRow := len(resultLines)/2 - len(popupLines)/2
+		if startRow < 1 {
+			startRow = 1
+		}
+		for i, line := range popupLines {
+			row := startRow + i
+			if row < len(resultLines) {
+				resultLines[row] = padding + line
+			}
+		}
+		result = strings.Join(resultLines, "\n")
+	}
+
+	return result
+}
+
 // renderVSCodeInfo renders the Visual Studio Code installation summary screen.
 func (m Model) renderVSCodeInfo() string {
 	var sb strings.Builder
@@ -974,3 +1217,4 @@ func (m Model) renderVSCodeDeps() string {
 
 	return sb.String()
 }
+

@@ -37,6 +37,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetWidth(msg.Width)
 		m.viewport.SetHeight(msg.Height - 6)
 		m = updatePreview(m)
+		m = updateServicesViewports(m)
 		m = updateVSCodeProfilePreview(m)
 		m = updateVSCodeHistoryPreview(m)
 		m = updateVSCodeDepsPreview(m)
@@ -110,6 +111,69 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = updatePreview(m)
 		m.state = stateHomeDotfiles
 		return m, nil
+
+	case servicesMsg:
+		m.servicesItems = msg.services
+		m.servicesCursor = 0
+		m.servicesFocusPanel = 0
+		m.servicesConfirmMode = false
+		m.servicesLogSize = ""
+		m.state = stateBrewServices
+		m = updateServicesViewports(m)
+		var detailCmd tea.Cmd
+		m, detailCmd = updateSelectedServiceDetails(m)
+		return m, detailCmd
+
+	case servicesLogsMsg:
+		m.servicesLogsContent = msg.content
+		m.servicesLogsStreaming = msg.streaming
+		if m.servicesLogsFilterMode && m.servicesLogsFilter != "" {
+			m.servicesLogsVP.SetContent(applyLogsFilter(msg.content, m.servicesLogsFilter))
+		} else {
+			m.servicesLogsVP.SetContent(msg.content)
+		}
+		if msg.scrollBottom {
+			m.servicesLogsVP.GotoBottom()
+		}
+		return m, nil
+
+	case servicesLogTickMsg:
+		// New line appended during streaming
+		if m.servicesLogsStreaming {
+			if m.servicesLogsContent != "" {
+				m.servicesLogsContent += "\n" + msg.line
+			} else {
+				m.servicesLogsContent = msg.line
+			}
+			display := m.servicesLogsContent
+			if m.servicesLogsFilter != "" {
+				display = applyLogsFilter(display, m.servicesLogsFilter)
+			}
+			m.servicesLogsVP.SetContent(display)
+			m.servicesLogsVP.GotoBottom()
+			return m, waitForLogLine(msg.lines)
+		}
+		return m, nil
+
+	case servicesLogStreamDoneMsg:
+		m.servicesLogsStreaming = false
+		m.servicesStreamProc = nil
+		return m, nil
+
+	case servicesLogSizeMsg:
+		m.servicesLogSize = msg.human
+		// Refresh info panel with the new size
+		var detailCmd2 tea.Cmd
+		m, detailCmd2 = updateSelectedServiceDetails(m)
+		return m, detailCmd2
+
+	case servicesActionDoneMsg:
+		// Action complete — refresh the services list
+		m.servicesConfirmMode = false
+		m.servicesConfirmAction = ""
+		m.state = stateLoading
+		m.loadingText = "Refreshing services..."
+		return m, tea.Batch(m.spinner.Tick, fetchServicesCmd())
 
 	case vscodeSummaryMsg:
 		m.vscodeSummary = msg.summary
@@ -230,6 +294,201 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
+		}
+
+
+		// --- Services panel logic ---
+		if m.state == stateBrewServices {
+			n := len(m.servicesItems)
+			var cmd tea.Cmd
+
+			// ── Priority 1: Confirmation popup ──────────────────────────────────
+			if m.servicesConfirmMode {
+				switch msg.String() {
+				case "enter", "y", "Y":
+					// Execute the confirmed action
+					action := m.servicesConfirmAction
+					m.servicesConfirmMode = false
+					m.servicesConfirmAction = ""
+					if n > 0 {
+						s := m.servicesItems[m.servicesCursor]
+						// Kill stream if running
+						if m.servicesStreamProc != nil {
+							_ = m.servicesStreamProc.Kill()
+							m.servicesStreamProc = nil
+							m.servicesLogsStreaming = false
+						}
+						m.state = stateLoading
+						m.loadingText = fmt.Sprintf("Running brew services %s %s...", action, s.Name)
+						return m, tea.Batch(m.spinner.Tick, runServiceActionCmd(s.Name, action))
+					}
+				case "n", "N", "esc":
+					m.servicesConfirmMode = false
+					m.servicesConfirmAction = ""
+				}
+				return m, nil
+			}
+
+			// ── Priority 2: Log filter text input ────────────────────────────────
+			if m.servicesLogsFilterMode {
+				switch msg.String() {
+				case "enter":
+					m.servicesLogsFilter = m.servicesLogsInput.Value()
+					m.servicesLogsFilterMode = false
+					display := applyLogsFilter(m.servicesLogsContent, m.servicesLogsFilter)
+					m.servicesLogsVP.SetContent(display)
+					m.servicesLogsVP.GotoTop()
+					return m, nil
+				case "esc":
+					m.servicesLogsFilter = ""
+					m.servicesLogsInput.SetValue("")
+					m.servicesLogsFilterMode = false
+					m.servicesLogsVP.SetContent(m.servicesLogsContent)
+					return m, nil
+				default:
+					m.servicesLogsInput, cmd = m.servicesLogsInput.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// ── Priority 3: Panel-specific navigation ───────────────────────────
+			if m.servicesFocusPanel == 1 {
+				// Info panel focused
+				switch msg.String() {
+				case "tab":
+					m.servicesFocusPanel = (m.servicesFocusPanel + 1) % 3
+					return m, nil
+				case "esc", "q":
+					m.servicesFocusPanel = 0
+					return m, nil
+				default:
+					m.servicesInfoVP, cmd = m.servicesInfoVP.Update(msg)
+					return m, cmd
+				}
+			} else if m.servicesFocusPanel == 2 {
+				// Logs panel focused — extra shortcuts
+				switch msg.String() {
+				case "tab":
+					m.servicesFocusPanel = (m.servicesFocusPanel + 1) % 3
+					return m, nil
+				case "esc":
+					m.servicesFocusPanel = 0
+					return m, nil
+				case "q":
+					// Stop stream first if running, then go back to list focus
+					if m.servicesLogsStreaming && m.servicesStreamProc != nil {
+						_ = m.servicesStreamProc.Kill()
+						m.servicesStreamProc = nil
+						m.servicesLogsStreaming = false
+					}
+					m.servicesFocusPanel = 0
+					return m, nil
+				case "g":
+					m.servicesLogsVP.GotoTop()
+					return m, nil
+				case "G":
+					m.servicesLogsVP.GotoBottom()
+					return m, nil
+				case "p":
+					// Toggle streaming pause
+					if m.servicesLogsStreaming && m.servicesStreamProc != nil {
+						_ = m.servicesStreamProc.Kill()
+						m.servicesStreamProc = nil
+						m.servicesLogsStreaming = false
+					} else if n > 0 {
+						// Restart stream
+						s := m.servicesItems[m.servicesCursor]
+						m.servicesLogsContent = ""
+						m.servicesLogsVP.SetContent("Connecting to log stream...")
+						var startCmd tea.Cmd
+						m, startCmd = startLogStreamCmd(m, s)
+						return m, startCmd
+					}
+					return m, nil
+				case "/":
+					m.servicesLogsFilterMode = true
+					m.servicesLogsInput.Focus()
+					return m, nil
+				default:
+					m.servicesLogsVP, cmd = m.servicesLogsVP.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// ── Main list has focus ──────────────────────────────────────────────
+			switch msg.String() {
+			case "esc", "q":
+				// Kill stream before leaving
+				if m.servicesStreamProc != nil {
+					_ = m.servicesStreamProc.Kill()
+					m.servicesStreamProc = nil
+					m.servicesLogsStreaming = false
+				}
+				m.state = stateBrewMenu
+				return m, nil
+			case "tab":
+				m.servicesFocusPanel = (m.servicesFocusPanel + 1) % 3
+				return m, nil
+			case "up", "k":
+				if m.servicesCursor > 0 {
+					// Stop current stream before switching service
+					if m.servicesStreamProc != nil {
+						_ = m.servicesStreamProc.Kill()
+						m.servicesStreamProc = nil
+						m.servicesLogsStreaming = false
+					}
+					m.servicesCursor--
+					m.servicesLogSize = ""
+					return updateSelectedServiceDetails(m)
+				}
+			case "down", "j":
+				if m.servicesCursor < n-1 {
+					// Stop current stream before switching service
+					if m.servicesStreamProc != nil {
+						_ = m.servicesStreamProc.Kill()
+						m.servicesStreamProc = nil
+						m.servicesLogsStreaming = false
+					}
+					m.servicesCursor++
+					m.servicesLogSize = ""
+					return updateSelectedServiceDetails(m)
+				}
+			case "R":
+				if m.servicesStreamProc != nil {
+					_ = m.servicesStreamProc.Kill()
+					m.servicesStreamProc = nil
+					m.servicesLogsStreaming = false
+				}
+				m.state = stateLoading
+				m.loadingText = "Refreshing services..."
+				return m, tea.Batch(m.spinner.Tick, fetchServicesCmd())
+			case "s":
+				if n > 0 {
+					m.servicesConfirmMode = true
+					m.servicesConfirmAction = "start"
+				}
+			case "x":
+				if n > 0 {
+					m.servicesConfirmMode = true
+					m.servicesConfirmAction = "stop"
+				}
+			case "r":
+				if n > 0 {
+					m.servicesConfirmMode = true
+					m.servicesConfirmAction = "restart"
+				}
+			case "K":
+				if n > 0 {
+					m.servicesConfirmMode = true
+					m.servicesConfirmAction = "kill"
+				}
+			case "Z":
+				if n > 0 {
+					s := m.servicesItems[m.servicesCursor]
+					return m, calcLogSizeCmd(s)
+				}
+			}
+			return m, nil
 		}
 
 		// --- VSCode Menu keys ---
@@ -961,6 +1220,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dotfileInput, cmd = m.dotfileInput.Update(msg)
 			cmds = append(cmds, cmd)
 		}
+	case stateBrewServices:
+		if m.servicesFocusPanel == 1 {
+			m.servicesInfoVP, cmd = m.servicesInfoVP.Update(msg)
+			cmds = append(cmds, cmd)
+		} else if m.servicesFocusPanel == 2 {
+			m.servicesLogsVP, cmd = m.servicesLogsVP.Update(msg)
+			cmds = append(cmds, cmd)
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -991,6 +1258,13 @@ func (m Model) dispatchBrewCmd(title string) (tea.Model, tea.Cmd) {
 	m.returnState = stateBrewMenu
 
 	switch title {
+	case "Services":
+		m.state = stateLoading
+		m.loadingText = "Listing services..."
+		m.servicesCursor = 0
+		m.servicesFocusPanel = 0
+		return m, tea.Batch(m.spinner.Tick, fetchServicesCmd())
+
 	case "Logs":
 		// Load the first page immediately (no loading spinner needed).
 		m.logPage = 0
@@ -1412,6 +1686,184 @@ func updatePreview(m Model) Model {
 	return m
 }
 
+// ─── Services message types ────────────────────────────────────────────────
+
+type servicesMsg struct {
+	services []brew.Service
+}
+
+type servicesLogsMsg struct {
+	content      string
+	streaming    bool
+	scrollBottom bool
+}
+
+type servicesLogTickMsg struct {
+	line  string
+	lines chan string // channel to continue reading from
+}
+
+type servicesLogStreamDoneMsg struct{}
+
+type servicesActionDoneMsg struct {
+	output string
+}
+
+type servicesLogSizeMsg struct {
+	size  int64
+	human string
+}
+
+// ─── Services commands ──────────────────────────────────────────────────────
+
+func fetchServicesCmd() tea.Cmd {
+	return func() tea.Msg {
+		pkgs, err := brew.ListServices()
+		if err != nil {
+			return errMsg(err)
+		}
+		return servicesMsg{services: pkgs}
+	}
+}
+
+func runServiceActionCmd(name, action string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := brew.ServiceAction(name, action)
+		if err != nil {
+			return errMsg(err)
+		}
+		return servicesActionDoneMsg{output: out}
+	}
+}
+
+func calcLogSizeCmd(s brew.Service) tea.Cmd {
+	return func() tea.Msg {
+		size, human := brew.ServiceLogSize(s)
+		return servicesLogSizeMsg{size: size, human: human}
+	}
+}
+
+// startLogStreamCmd launches a tail -f process on the service log and returns
+// the model with servicesStreamProc set, plus the first Cmd to begin reading.
+func startLogStreamCmd(m Model, s brew.Service) (Model, tea.Cmd) {
+	logFile := brew.ServiceLogFile(s)
+	if logFile == "" {
+		m.servicesLogsVP.SetContent("No log file found for streaming.")
+		return m, nil
+	}
+
+	cmd := exec.Command("tail", "-n", "50", "-f", logFile)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		m.servicesLogsVP.SetContent(fmt.Sprintf("Error opening log pipe: %v", err))
+		return m, nil
+	}
+	if err := cmd.Start(); err != nil {
+		m.servicesLogsVP.SetContent(fmt.Sprintf("Error starting tail: %v", err))
+		return m, nil
+	}
+
+	m.servicesStreamProc = cmd.Process
+	m.servicesLogsStreaming = true
+	m.servicesLogsContent = ""
+
+	lines := make(chan string, 256)
+
+	// Goroutine: read lines from tail and push them into the channel
+	go func() {
+		defer close(lines)
+		buf := make([]byte, 4096)
+		var partial string
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				chunk := partial + string(buf[:n])
+				ls := strings.Split(chunk, "\n")
+				partial = ls[len(ls)-1]
+				for _, l := range ls[:len(ls)-1] {
+					lines <- l
+				}
+			}
+			if err != nil {
+				if partial != "" {
+					lines <- partial
+				}
+				return
+			}
+		}
+	}()
+
+	// Initial tick to start reading
+	tickcmd := waitForLogLine(lines)
+	return m, tickcmd
+}
+
+// waitForLogLine blocks until a new line arrives on the channel and returns a
+// servicesLogTickMsg so the Bubble Tea runtime wakes up the model.
+func waitForLogLine(lines chan string) tea.Cmd {
+	return func() tea.Msg {
+		line, ok := <-lines
+		if !ok {
+			return servicesLogStreamDoneMsg{}
+		}
+		return servicesLogTickMsg{line: line, lines: lines}
+	}
+}
+
+// applyLogsFilter filters multi-line log content keeping only matching lines.
+func applyLogsFilter(content, filter string) string {
+	if filter == "" {
+		return content
+	}
+	fl := strings.ToLower(filter)
+	var out []string
+	for _, line := range strings.Split(content, "\n") {
+		if strings.Contains(strings.ToLower(line), fl) {
+			out = append(out, line)
+		}
+	}
+	if len(out) == 0 {
+		return fmt.Sprintf("(no lines match filter %q)", filter)
+	}
+	return strings.Join(out, "\n")
+}
+
+// ─── Viewport sizing ────────────────────────────────────────────────────────
+
+func updateServicesViewports(m Model) Model {
+	// Total height for content
+	contentH := m.height - 5
+	if contentH < 10 {
+		contentH = 10
+	}
+
+	// Left column width
+	leftColW := 22
+	rightColW := m.width - leftColW - 4
+	if rightColW < 20 {
+		rightColW = 20
+	}
+
+	infoH := (contentH * 60) / 100
+	logsH := contentH - infoH - 2
+	if infoH < 3 {
+		infoH = 3
+	}
+	if logsH < 3 {
+		logsH = 3
+	}
+
+	m.servicesInfoVP.SetWidth(rightColW - 2)
+	m.servicesInfoVP.SetHeight(infoH - 2)
+
+	m.servicesLogsVP.SetWidth(rightColW - 2)
+	m.servicesLogsVP.SetHeight(logsH - 2)
+
+	return m
+}
+
+// ─── VSCode helpers (from main) ──────────────────────────────────────────────
+
 // vscodeInfoMsg carries the gathered VSCode summary back to the model.
 type vscodeInfoMsg struct {
 	summary apps.VSCodeSummary
@@ -1620,6 +2072,95 @@ func updateVSCodeProfilePreview(m Model) Model {
 	return m
 }
 
+// ─── Info panel builder ─────────────────────────────────────────────────────
+
+func updateSelectedServiceDetails(m Model) (Model, tea.Cmd) {
+	if len(m.servicesItems) == 0 {
+		m.servicesInfoVP.SetContent("No services available.")
+		m.servicesLogsVP.SetContent("")
+		return m, nil
+	}
+
+	s := m.servicesItems[m.servicesCursor]
+
+	// Refresh log paths cache
+	m.servicesLogPaths = brew.ServiceLogPaths(s)
+
+	// Build info pane
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Name:        %s\n", s.Name))
+
+	statusSymbol := "●"
+	var statusColor string
+	if s.Status == "started" {
+		statusColor = "42" // Green
+	} else if s.Status == "stopped" {
+		statusColor = "196" // Red
+	} else {
+		statusColor = "243" // Gray
+	}
+	styledStatus := lipgloss.NewStyle().Foreground(lipgloss.Color(statusColor)).Bold(true).Render(fmt.Sprintf("%s %s", statusSymbol, s.Status))
+	sb.WriteString(fmt.Sprintf("Status:      %s\n", styledStatus))
+
+	if s.User != "" {
+		sb.WriteString(fmt.Sprintf("User:        %s\n", s.User))
+	}
+	if s.Version != "" {
+		sb.WriteString(fmt.Sprintf("Version:     %s\n", s.Version))
+	}
+	if s.Path != "" {
+		sb.WriteString(fmt.Sprintf("Path:        %s\n", s.Path))
+	}
+	if s.File != "" {
+		sb.WriteString(fmt.Sprintf("Plist File:  %s\n", s.File))
+	}
+	if s.ExitCode != 0 {
+		sb.WriteString(fmt.Sprintf("Exit Code:   %d\n", s.ExitCode))
+	}
+	if s.Desc != "" {
+		sb.WriteString(fmt.Sprintf("\nDesc:        %s\n", s.Desc))
+	}
+	if s.Homepage != "" {
+		sb.WriteString(fmt.Sprintf("Homepage:    %s\n", s.Homepage))
+	}
+
+	// Log file paths
+	if len(m.servicesLogPaths) > 0 {
+		sb.WriteString("\nLog Files:\n")
+		for _, p := range m.servicesLogPaths {
+			sb.WriteString(fmt.Sprintf("  %s\n", p))
+		}
+	} else {
+		sb.WriteString("\nLog Files:   (none found)\n")
+	}
+
+	// Log size (if computed)
+	if m.servicesLogSize != "" {
+		sb.WriteString(fmt.Sprintf("Log Size:    %s\n", m.servicesLogSize))
+	} else {
+		sb.WriteString("Log Size:    [press Z to calculate]\n")
+	}
+
+	sb.WriteString("\nActions:     [s]tart  [x]stop  [r]estart  [K]ill\n")
+
+	wrappedInfo := WordWrap(sb.String(), m.servicesInfoVP.Width()-2)
+	m.servicesInfoVP.SetContent(wrappedInfo)
+	m.servicesInfoVP.GotoTop()
+
+	// Load initial logs (static snapshot) and start streaming
+	if m.servicesStreamProc != nil {
+		_ = m.servicesStreamProc.Kill()
+		m.servicesStreamProc = nil
+		m.servicesLogsStreaming = false
+	}
+	m.servicesLogsContent = ""
+	m.servicesLogsVP.SetContent("Starting log stream...")
+
+	var streamCmd tea.Cmd
+	m, streamCmd = startLogStreamCmd(m, s)
+	return m, streamCmd
+}
+
 func updateVSCodeHistoryPreview(m Model) Model {
 	if len(m.vscodeRefreshHistory) == 0 || m.vscodeHistoryCursor < 0 || m.vscodeHistoryCursor >= len(m.vscodeRefreshHistory) {
 		m.vscodeHistoryDetailVP.SetContent("")
@@ -1753,3 +2294,4 @@ func updateVSCodeDepsPreview(m Model) Model {
 
 	return m
 }
+

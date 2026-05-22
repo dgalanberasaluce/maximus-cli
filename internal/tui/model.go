@@ -2,10 +2,12 @@
 package tui
 
 import (
+	"os"
+	"time"
+
 	"maximus-cli/internal/apps"
 	"maximus-cli/internal/brew"
 	"maximus-cli/internal/db"
-	"time"
 
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/spinner"
@@ -29,6 +31,7 @@ const (
 	stateUpgradePkgs  // select and upgrade specific packages screen
 	stateHomeMenu     // home sub-menu (Explain / Reload)
 	stateHomeDotfiles // home dotfiles table
+	stateBrewServices // services management panel
 	stateAppsMenu     // apps sub-menu
 	stateVSCodeInfo   // vscode installation summary screen
 	stateVSCodeMenu   // vscode sub-menu (Summary/Profiles/History/Refresh)
@@ -156,6 +159,28 @@ type Model struct {
 	dotfileDeleteInput    textinput.Model // input for typing file name to delete
 	previewViewport       viewport.Model  // viewport for scrollable preview pane
 
+	// Services state
+	servicesItems          []brew.Service
+	servicesCursor         int
+	servicesInfoVP         viewport.Model
+	servicesLogsVP         viewport.Model
+	servicesFocusPanel     int    // 0=list, 1=info, 2=logs
+	servicesLogsContent    string // cached full (unfiltered) log content
+	// Confirmation popup
+	servicesConfirmMode    bool   // true = popup visible
+	servicesConfirmAction  string // "start"|"stop"|"restart"|"kill"
+	// Log streaming
+	servicesStreamProc     *os.Process // running tail -f process, nil if stopped
+	servicesLogsStreaming   bool        // true when streaming is active
+	// Log filter
+	servicesLogsFilter     string
+	servicesLogsFilterMode bool
+	servicesLogsInput      textinput.Model
+	// Log size (computed on demand via Z key)
+	servicesLogSize        string // human-readable, e.g. "1.2 MB", empty until computed
+	// Log paths (cached from last fetch)
+	servicesLogPaths       []string
+
 	// Apps state
 	appsList                list.Model
 	vscodeSummary           apps.VSCodeSummary
@@ -248,6 +273,7 @@ func New(brewfilePath string, database *db.DB) Model {
 		menuItem{title: "Unstaged", desc: "Show packages installed but not in Brewfile (brew bundle cleanup --dry-run)"},
 		menuItem{title: "Remove", desc: "⚠  Remove packages not in Brewfile (brew bundle cleanup --force)"},
 		menuItem{title: "Version", desc: "Show installed versions of all Brewfile packages (sortable & filterable)"},
+		menuItem{title: "Services", desc: "View and manage Homebrew services (start/stop/restart/kill)"},
 		menuItem{title: "Logs", desc: "View upgrade history (last 20 entries, filterable)"},
 		menuItem{title: "Cheatsheet", desc: "Quick reference for Homebrew commands"},
 	}
@@ -289,6 +315,17 @@ func New(brewfilePath string, database *db.DB) Model {
 
 	pv := viewport.New()
 
+	sip := viewport.New()
+	sip.Style = lipgloss.NewStyle().Padding(0, 1)
+
+	slp := viewport.New()
+	slp.Style = lipgloss.NewStyle().Padding(0, 1)
+
+	sli := textinput.New()
+	sli.Placeholder = "filter logs..."
+	sli.CharLimit = 120
+	sli.SetWidth(40)
+
 	vdi := textinput.New()
 	vdi.Placeholder = "filter extensions..."
 	vdi.CharLimit = 60
@@ -316,6 +353,10 @@ func New(brewfilePath string, database *db.DB) Model {
 		previewViewport:       pv,
 		dotfilePreviewFocused: false,
 		dotfileDeleteMode:     false,
+		servicesInfoVP:        sip,
+		servicesLogsVP:        slp,
+		servicesFocusPanel:    0,
+		servicesLogsInput:     sli,
 		appsList:              al,
 		vscodeList:            vl,
 		vscodeShowArchived:    false,

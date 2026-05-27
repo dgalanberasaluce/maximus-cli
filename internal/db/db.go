@@ -77,7 +77,8 @@ func (d *DB) migrate() error {
 			tool_manual BOOLEAN NOT NULL DEFAULT 0,
 			modified_at DATETIME NOT NULL,
 			created_at  DATETIME NOT NULL,
-			scanned_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			scanned_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			size_bytes  INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_dotfiles_name ON dotfiles(name)`,
 	}
@@ -87,8 +88,9 @@ func (d *DB) migrate() error {
 		}
 	}
 
-	// Dynamic migration for existing databases:
+	// Dynamic migrations for existing databases:
 	_, _ = d.conn.Exec(`ALTER TABLE dotfiles ADD COLUMN tool_manual BOOLEAN NOT NULL DEFAULT 0`)
+	_, _ = d.conn.Exec(`ALTER TABLE dotfiles ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`)
 
 	if err := d.migrateVSCode(); err != nil {
 		return err
@@ -400,23 +402,26 @@ type DotfileEntry struct {
 	ModifiedAt time.Time
 	CreatedAt  time.Time
 	ScannedAt  time.Time
+	SizeBytes  int64
 }
 
 // UpsertDotfile inserts or updates a dotfile entry.
-func (d *DB) UpsertDotfile(name string, isDir bool, tool string, modifiedAt, createdAt time.Time) error {
+func (d *DB) UpsertDotfile(name string, isDir bool, tool string, modifiedAt, createdAt time.Time, sizeBytes int64) error {
 	_, err := d.conn.Exec(
-		`INSERT INTO dotfiles(name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at)
-		 VALUES (?, ?, ?, 0, ?, ?, ?)
+		`INSERT INTO dotfiles(name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at, size_bytes)
+		 VALUES (?, ?, ?, 0, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		 	is_dir=excluded.is_dir,
 		 	tool=CASE WHEN dotfiles.tool_manual=1 THEN dotfiles.tool ELSE excluded.tool END,
 		 	modified_at=excluded.modified_at,
 		 	created_at=excluded.created_at,
-		 	scanned_at=excluded.scanned_at`,
+		 	scanned_at=excluded.scanned_at,
+		 	size_bytes=excluded.size_bytes`,
 		name, isDir, tool,
 		modifiedAt.UTC().Format(time.RFC3339),
 		createdAt.UTC().Format(time.RFC3339),
 		time.Now().UTC().Format(time.RFC3339),
+		sizeBytes,
 	)
 	if err != nil {
 		return fmt.Errorf("db: upsert dotfile %q: %w", name, err)
@@ -459,7 +464,7 @@ func (d *DB) DeleteDotfile(name string) error {
 // limit <= 0 means no limit (represented as -1).
 func (d *DB) GetDotfiles(filter string, sortBy string, asc bool, limit, offset int) ([]DotfileEntry, error) {
 	var query strings.Builder
-	query.WriteString(`SELECT id, name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at FROM dotfiles`)
+	query.WriteString(`SELECT id, name, is_dir, tool, tool_manual, modified_at, created_at, scanned_at, size_bytes FROM dotfiles`)
 
 	var args []any
 	if filter != "" {
@@ -501,7 +506,7 @@ func (d *DB) GetDotfiles(filter string, sortBy string, asc bool, limit, offset i
 	for rows.Next() {
 		var e DotfileEntry
 		var modStr, creStr, scaStr string
-		if err := rows.Scan(&e.ID, &e.Name, &e.IsDir, &e.Tool, &e.ToolManual, &modStr, &creStr, &scaStr); err != nil {
+		if err := rows.Scan(&e.ID, &e.Name, &e.IsDir, &e.Tool, &e.ToolManual, &modStr, &creStr, &scaStr, &e.SizeBytes); err != nil {
 			return nil, fmt.Errorf("db: scan dotfile: %w", err)
 		}
 		e.ModifiedAt, _ = time.Parse(time.RFC3339, modStr)

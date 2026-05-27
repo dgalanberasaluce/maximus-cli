@@ -11,6 +11,24 @@ import (
 	"maximus-cli/internal/db"
 )
 
+// dirSizeShallow returns the sum of sizes of immediate (non-recursive) children
+// of the given directory. Symbolic links are counted by their own size.
+// Returns 0 on error.
+func dirSizeShallow(path string) int64 {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		info, err := e.Info()
+		if err == nil {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
 type ScanResult struct {
 	Entries  []db.DotfileEntry
 	Added    []string
@@ -70,6 +88,14 @@ func ScanDotfiles(database *db.DB) (ScanResult, error) {
 		modifiedAt := info.ModTime()
 		createdAt := getCreationTime(info)
 
+		// Compute size: files use their direct size; directories use a shallow walk.
+		var sizeBytes int64
+		if isDir {
+			sizeBytes = dirSizeShallow(fullPath)
+		} else {
+			sizeBytes = info.Size()
+		}
+
 		// 3. Compare with existing state
 		if old, exists := oldMap[name]; exists {
 			// Compare modification times (Unix timestamp to ignore timezone/nanosecond diffs)
@@ -83,7 +109,7 @@ func ScanDotfiles(database *db.DB) (ScanResult, error) {
 		seen[name] = true
 
 		// Save to DB
-		err = database.UpsertDotfile(name, isDir, tool, modifiedAt, createdAt)
+		err = database.UpsertDotfile(name, isDir, tool, modifiedAt, createdAt, sizeBytes)
 		if err != nil {
 			return result, fmt.Errorf("home: save dotfile %q: %w", name, err)
 		}

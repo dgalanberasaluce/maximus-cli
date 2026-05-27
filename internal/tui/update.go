@@ -882,6 +882,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.dotfileToolInput.Focus()
 					m.dotfileToolEditMode = true
 				}
+			case "p":
+				// Open selected file with `less`. No-op for directories.
+				if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {
+					selected := m.dotfileFiltered[m.dotfileCursor]
+					if !selected.IsDir {
+						homeDir, err := os.UserHomeDir()
+						if err == nil {
+							fullPath := filepath.Join(homeDir, selected.Name)
+							lessCmd := exec.Command("less", fullPath)
+							return m, tea.ExecProcess(lessCmd, func(err error) tea.Msg {
+								return editorFinishedMsg{err}
+							})
+						}
+					}
+				}
 			case "d":
 				// Enter deletion confirmation mode for the highlighted row.
 				if m.dotfileCursor >= 0 && m.dotfileCursor < len(m.dotfileFiltered) {

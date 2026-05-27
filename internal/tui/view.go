@@ -572,7 +572,7 @@ func (m Model) renderDotfileTable() string {
 		))
 	} else {
 		sb.WriteString(helpStyle.Render(
-			"  tab preview panel · ↑/↓ navigate · ←/→ sort · / filter · t type · e edit tool · d delete · q back",
+			"  tab preview panel · ↑/↓ navigate · ←/→ sort · / filter · t type · e edit tool · p open with less · d delete · q back",
 		))
 	}
 	sb.WriteString("\n")
@@ -623,7 +623,7 @@ func dotfileTableRows(items []db.DotfileEntry, sortField dotfileSortField, sortA
 	var sb strings.Builder
 
 	// Column widths.
-	const nameW, typeW, toolW, dateW = 30, 6, 18, 12
+	const nameW, typeW, toolW, sizeW, dateW = 30, 6, 18, 9, 12
 
 	// Column headers helper
 	sortDFLabel := func(col, active dotfileSortField, asc bool, label string, width int) string {
@@ -638,15 +638,16 @@ func dotfileTableRows(items []db.DotfileEntry, sortField dotfileSortField, sortA
 	}
 
 	// Header line
-	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %s",
+	header := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
 		nameW, sortDFLabel(sortDFByName, sortField, sortAsc, "NAME", nameW),
 		typeW, sortDFLabel(sortDFByType, sortField, sortAsc, "TYPE", typeW),
 		toolW, sortDFLabel(sortDFByTool, sortField, sortAsc, "TOOL", toolW),
+		sizeW, "SIZE",
 		dateW, sortDFLabel(sortDFByModified, sortField, sortAsc, "MODIFIED", dateW),
 		sortDFLabel(sortDFByCreated, sortField, sortAsc, "CREATED", 12),
 	)
 	sb.WriteString(headerStyle.Render(header) + "\n")
-	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 84)) + "\n")
+	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 96)) + "\n")
 
 	highlighted := lipgloss.NewStyle().
 		Bold(true).
@@ -671,10 +672,13 @@ func dotfileTableRows(items []db.DotfileEntry, sortField dotfileSortField, sortA
 			toolName = "* " + p.Tool
 		}
 
-		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %s",
+		sizeStr := home.FormatSize(p.SizeBytes, p.IsDir)
+
+		row := fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
 			nameW, truncate(p.Name, nameW),
 			typeW, tStr,
 			toolW, truncate(toolName, toolW),
+			sizeW, truncate(sizeStr, sizeW),
 			dateW, modDate,
 			creDate,
 		)

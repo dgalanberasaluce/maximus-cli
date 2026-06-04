@@ -38,12 +38,12 @@ type servicesBrewInfoJSON struct {
 }
 
 type servicesFormulaJSON struct {
-	Name      string                    `json:"name"`
-	Desc      string                    `json:"desc"`
-	Homepage  string                    `json:"homepage"`
+	Name      string                     `json:"name"`
+	Desc      string                     `json:"desc"`
+	Homepage  string                     `json:"homepage"`
 	Installed []servicesFormulaInstalled `json:"installed"`
-	LinkedKeg string                    `json:"linked_keg"`
-	Service   *servicesFormulaService   `json:"service"`
+	LinkedKeg string                     `json:"linked_keg"`
+	Service   *servicesFormulaService    `json:"service"`
 }
 
 type servicesFormulaInstalled struct {

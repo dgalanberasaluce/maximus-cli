@@ -450,4 +450,3 @@ func (d *DB) GetVSCodeDependenciesAgg() ([]VSCodeExtAggRow, error) {
 	}
 	return list, nil
 }
-

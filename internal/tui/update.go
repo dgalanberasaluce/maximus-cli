@@ -309,6 +309,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case repoCatDoneMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		// Update in-memory items
+		for i, r := range m.githubRepoItems {
+			if r.ID == msg.id {
+				m.githubRepoItems[i].Category = msg.category
+				break
+			}
+		}
+		for i, r := range m.githubRepoFiltered {
+			if r.ID == msg.id {
+				m.githubRepoFiltered[i].Category = msg.category
+				break
+			}
+		}
+		m = updateGitHubRepoPreview(m)
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
@@ -847,6 +867,78 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
+			// Priority 3.5: category picker overlay
+			if m.githubRepoCatPickerMode {
+				var cmd tea.Cmd
+				if m.githubRepoCatNewMode {
+					// typing a new category
+					switch msg.String() {
+					case "enter":
+						cat := strings.TrimSpace(m.githubRepoCatNewInput.Value())
+						m.githubRepoCatPickerMode = false
+						m.githubRepoCatNewMode = false
+						if m.githubRepoCursor >= 0 && m.githubRepoCursor < len(m.githubRepoFiltered) {
+							repo := m.githubRepoFiltered[m.githubRepoCursor]
+							database := m.database
+							return m, func() tea.Msg {
+								err := database.UpdateGitHubRepoCategory(repo.ID, cat)
+								return repoCatDoneMsg{id: repo.ID, category: cat, err: err}
+							}
+						}
+					case "esc":
+						m.githubRepoCatNewMode = false
+						m.githubRepoCatNewInput.SetValue("")
+					default:
+						m.githubRepoCatNewInput, cmd = m.githubRepoCatNewInput.Update(msg)
+						return m, cmd
+					}
+					return m, nil
+				}
+				// navigating the list
+				nOpts := len(m.githubRepoCatOptions)
+				switch msg.String() {
+				case "up", "k":
+					if m.githubRepoCatCursor > 0 {
+						m.githubRepoCatCursor--
+					}
+				case "down", "j":
+					if m.githubRepoCatCursor < nOpts-1 {
+						m.githubRepoCatCursor++
+					}
+				case "enter":
+					if m.githubRepoCatCursor >= 0 && m.githubRepoCatCursor < nOpts {
+						selected := m.githubRepoCatOptions[m.githubRepoCatCursor]
+						if selected == "(new…)" {
+							m.githubRepoCatNewMode = true
+							m.githubRepoCatNewInput.SetValue("")
+							m.githubRepoCatNewInput.Focus()
+							return m, nil
+						}
+						m.githubRepoCatPickerMode = false
+						cat := ""
+						if selected != "(none)" {
+							cat = selected
+						}
+						if m.githubRepoCursor >= 0 && m.githubRepoCursor < len(m.githubRepoFiltered) {
+							repo := m.githubRepoFiltered[m.githubRepoCursor]
+							database := m.database
+							return m, func() tea.Msg {
+								err := database.UpdateGitHubRepoCategory(repo.ID, cat)
+								return repoCatDoneMsg{id: repo.ID, category: cat, err: err}
+							}
+						}
+					}
+				case "n":
+					m.githubRepoCatNewMode = true
+					m.githubRepoCatNewInput.SetValue("")
+					m.githubRepoCatNewInput.Focus()
+				case "esc", "q":
+					m.githubRepoCatPickerMode = false
+					m.githubRepoCatNewMode = false
+				}
+				return m, nil
+			}
+
 			// Priority 3: preview panel focused
 			if m.githubRepoPreviewFocus {
 				switch msg.String() {
@@ -914,6 +1006,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.githubRepoAddInput.SetValue("")
 				m.githubRepoAddInput.Placeholder = "owner (e.g. microsoft)"
 				m.githubRepoAddInput.Focus()
+				return m, nil
+			case "c":
+				if m.githubRepoCursor >= 0 && m.githubRepoCursor < len(m.githubRepoFiltered) {
+					cats, _ := m.database.GetGitHubRepoCategories()
+					m.githubRepoCatOptions = append([]string{"(none)"}, cats...)
+					m.githubRepoCatOptions = append(m.githubRepoCatOptions, "(new…)")
+					m.githubRepoCatCursor = 0
+					// Pre-select current category if it exists
+					current := m.githubRepoFiltered[m.githubRepoCursor].Category
+					for i, o := range m.githubRepoCatOptions {
+						if o == current {
+							m.githubRepoCatCursor = i
+							break
+						}
+					}
+					m.githubRepoCatPickerMode = true
+					m.githubRepoCatNewMode = false
+				}
 				return m, nil
 			case "r":
 				m.githubRepoFilter = ""
@@ -2219,6 +2329,12 @@ type githubReposMsg struct {
 type addRepoDoneMsg struct {
 	success bool
 	msg     string
+}
+
+type repoCatDoneMsg struct {
+	id       int64
+	category string
+	err      error
 }
 
 func fetchGitHubReposCmd(database *db.DB) tea.Cmd {

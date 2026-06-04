@@ -78,10 +78,10 @@ type VSCodeDiff struct {
 // brewCaskInfo is used to parse the JSON output of brew info.
 type brewCaskInfo struct {
 	Casks []struct {
-		Token         string   `json:"token"`
-		Version       string   `json:"version"`
-		Installed     string   `json:"installed"`
-		InstalledTime int64    `json:"installed_time"`
+		Token         string `json:"token"`
+		Version       string `json:"version"`
+		Installed     string `json:"installed"`
+		InstalledTime int64  `json:"installed_time"`
 		DependsOn     struct {
 			Formula []string               `json:"formula"`
 			Cask    []string               `json:"cask"`
@@ -92,8 +92,8 @@ type brewCaskInfo struct {
 
 // storageJSON represents the structure inside VSCode storage.json.
 type storageJSON struct {
-	UserDataProfiles    []profileEntry                 `json:"userDataProfiles"`
-	ProfileAssociations profileAssociationsStructure   `json:"profileAssociations"`
+	UserDataProfiles    []profileEntry               `json:"userDataProfiles"`
+	ProfileAssociations profileAssociationsStructure `json:"profileAssociations"`
 }
 
 type profileEntry struct {
@@ -832,4 +832,3 @@ func downloadREADMEs(metas map[string]marketplaceMeta) map[string]string {
 
 	return readmes
 }
-

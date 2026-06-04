@@ -65,7 +65,9 @@ func (m Model) View() tea.View {
 		content = m.renderVSCodeDeps()
 
 	case stateGitHubRepos:
-		if m.githubRepoAddMode || m.githubRepoAddInputStep == 2 {
+		if m.githubRepoCatPickerMode {
+			content = m.renderGitHubRepoCatPicker()
+		} else if m.githubRepoAddMode || m.githubRepoAddInputStep == 2 {
 			content = m.renderGitHubRepoAddOverlay()
 		} else {
 			content = m.renderGitHubRepos()
@@ -1311,7 +1313,7 @@ func (m Model) renderGitHubRepos() string {
 
 	// ── Key hints ────────────────────────────────────────────────────────────
 	sb.WriteString(helpStyle.Render(
-		"  ↑/↓ navigate · ←/→ sort col · s sort order · / filter · a added col · n new · r refresh · q back",
+		"  ↑/↓ navigate · ←/→ sort col · s sort order · / filter · c category · a added col · n new · r refresh · q back",
 	))
 	sb.WriteString("\n")
 
@@ -1497,3 +1499,114 @@ func (m Model) renderGitHubRepoAddOverlay() string {
 
 	return strings.Join(bgLines, "\n")
 }
+
+// renderGitHubRepoCatPicker renders the category selection overlay panel composited on top of the main view.
+func (m Model) renderGitHubRepoCatPicker() string {
+	// Render the background table so it remains visible
+	bg := m.renderGitHubRepos()
+
+	overlayW := 55
+	nOpts := len(m.githubRepoCatOptions)
+	overlayH := nOpts + 6
+	if overlayH > 22 {
+		overlayH = 22
+	}
+	if overlayH < 10 {
+		overlayH = 10
+	}
+
+	leftPad := (m.width - overlayW - 4) / 2
+	topPad := (m.height - overlayH - 2) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	var content strings.Builder
+	content.WriteString("\n")
+
+	// Header
+	repoName := ""
+	if m.githubRepoCursor >= 0 && m.githubRepoCursor < len(m.githubRepoFiltered) {
+		repoName = m.githubRepoFiltered[m.githubRepoCursor].Name
+	}
+	if len(repoName) > 28 {
+		repoName = repoName[:25] + "..."
+	}
+	content.WriteString("  " + headerStyle.Render("Edit Category: "+repoName) + "\n\n")
+
+	if m.githubRepoCatNewMode {
+		content.WriteString("  " + helpStyle.Render("Enter new category name:") + "\n\n")
+		content.WriteString("  " + m.githubRepoCatNewInput.View() + "\n\n")
+		content.WriteString(helpStyle.Render("  enter to save · esc to back"))
+	} else {
+		maxVisible := overlayH - 6
+		startIdx := 0
+		if m.githubRepoCatCursor >= maxVisible {
+			startIdx = m.githubRepoCatCursor - maxVisible + 1
+		}
+		endIdx := startIdx + maxVisible
+		if endIdx > nOpts {
+			endIdx = nOpts
+		}
+
+		for idx := startIdx; idx < endIdx; idx++ {
+			opt := m.githubRepoCatOptions[idx]
+			prefix := "  "
+			if idx == m.githubRepoCatCursor {
+				prefix = "> "
+			}
+
+			var lineStyle lipgloss.Style
+			if idx == m.githubRepoCatCursor {
+				lineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+			} else if opt == "(none)" || opt == "(new…)" {
+				lineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+			} else {
+				lineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+			}
+
+			content.WriteString(prefix + lineStyle.Render(opt) + "\n")
+		}
+
+		content.WriteString("\n" + helpStyle.Render("  ↑/↓ navigate · enter select · n new · esc cancel"))
+	}
+
+	// Render overlay panel with rounded border
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("212")).
+		Padding(1, 2).
+		Width(overlayW).
+		Height(overlayH).
+		Render(content.String())
+
+	// Composite the overlay on top of the background
+	bgLines := strings.Split(bg, "\n")
+	panelLines := strings.Split(panel, "\n")
+
+	for len(bgLines) < topPad+len(panelLines) {
+		bgLines = append(bgLines, "")
+	}
+
+	for i, pLine := range panelLines {
+		row := topPad + i
+		if row >= len(bgLines) {
+			bgLines = append(bgLines, "")
+		}
+		bgLine := bgLines[row]
+		for len(bgLine) < leftPad {
+			bgLine += " "
+		}
+		if leftPad <= len(bgLine) {
+			bgLines[row] = bgLine[:leftPad] + pLine
+		} else {
+			bgLines[row] = strings.Repeat(" ", leftPad) + pLine
+		}
+	}
+
+	return strings.Join(bgLines, "\n")
+}
+

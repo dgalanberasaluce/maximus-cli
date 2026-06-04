@@ -238,6 +238,13 @@ type Model struct {
 	githubRepoAddMsg       string
 	githubRepoAddMsgType   string // "loading", "success", "error"
 	githubRepoAddSpinner   spinner.Model
+
+	// Category picker state
+	githubRepoCatPickerMode bool            // overlay is open
+	githubRepoCatOptions    []string        // options: "(none)", existing cats, "(new…)"
+	githubRepoCatCursor     int             // highlighted option index
+	githubRepoCatNewInput   textinput.Model // text input for custom category
+	githubRepoCatNewMode    bool            // true when "(new…)" is selected, typing mode
 }
 
 // styles
@@ -383,6 +390,11 @@ func New(brewfilePath string, database *db.DB) Model {
 
 	grpv := viewport.New()
 
+	grcni := textinput.New()
+	grcni.Placeholder = "new category..."
+	grcni.CharLimit = 60
+	grcni.SetWidth(36)
+
 	return Model{
 		state:                 stateMainMenu,
 		returnState:           stateMainMenu,
@@ -422,6 +434,7 @@ func New(brewfilePath string, database *db.DB) Model {
 		githubRepoPreviewVP:   grpv,
 		githubRepoAddInput:    grai,
 		githubRepoAddSpinner:  grs,
+		githubRepoCatNewInput: grcni,
 	}
 }
 

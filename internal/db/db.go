@@ -96,6 +96,10 @@ func (d *DB) migrate() error {
 		return err
 	}
 
+	if err := d.migrateGitHubRepos(); err != nil {
+		return err
+	}
+
 	return nil
 }
 

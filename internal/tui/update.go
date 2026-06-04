@@ -582,6 +582,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// --- Git Repo Tracker Menu keys ---
+		if m.state == stateGitRepoMenu {
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateAppsMenu
+				return m, nil
+			case "enter":
+				if i, ok := m.gitRepoMenuList.SelectedItem().(menuItem); ok {
+					return m.dispatchGitRepoCmd(i.title)
+				}
+			}
+			m.gitRepoMenuList, cmd = m.gitRepoMenuList.Update(msg)
+			return m, cmd
+		}
+
 		// --- VSCode Summary keys ---
 		if m.state == stateVSCodeInfo {
 			switch msg.String() {
@@ -995,7 +1010,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Priority 3: table navigation / filters
 			switch msg.String() {
 			case "esc", "q":
-				m.state = stateAppsMenu
+				m.state = stateGitRepoMenu
 				return m, nil
 			case "/":
 				m.githubRepoInput.SetValue(m.githubRepoFilter)
@@ -1142,6 +1157,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.repoTrackerRefreshing = true
 					return m, tea.Batch(m.spinner.Tick, refreshStarsCmd(m.database, m.repoTrackerLastID, 60))
 				}
+
+			case "esc", "q":
+				m.state = stateGitRepoMenu
+				return m, nil
 			}
 			return m, nil
 		}

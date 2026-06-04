@@ -290,12 +290,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoTop()
 		return m, nil
 
+	case githubReposMsg:
+		m.githubRepoItems = msg.repos
+		m.githubRepoFiltered = msg.repos
+		m.githubRepoCursor = 0
+		m.state = stateGitHubRepos
+		m = applyGitHubRepoFilter(m)
+		m = updateGitHubRepoPreview(m)
+		return m, nil
+
+	case addRepoDoneMsg:
+		m.githubRepoAddMode = false
+		m.githubRepoAddInputMode = false
+		m.githubRepoAddMsg = msg.msg
+		m.githubRepoAddMsgType = "success"
+		if !msg.success {
+			m.githubRepoAddMsgType = "error"
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "ctrl+c":
 			return m, tea.Quit
 		}
-
 
 		// --- Services panel logic ---
 		if m.state == stateBrewServices {
@@ -709,6 +727,204 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.vscodeDepsVP, cmd = m.vscodeDepsVP.Update(msg)
 					return m, cmd
 				}
+			}
+			return m, nil
+		}
+
+		// --- Git Repo Tracker keys ---
+		if m.state == stateGitHubRepos {
+			n := len(m.githubRepoFiltered)
+			var cmd tea.Cmd
+
+			// Priority 1: add repo overlay input
+			if m.githubRepoAddInputMode {
+				switch msg.String() {
+				case "enter":
+					if m.githubRepoAddInputStep == 0 {
+						// First input: owner (or owner/repo)
+						val := m.githubRepoAddInput.Value()
+						if val == "" {
+							return m, nil
+						}
+						// Check if user typed "owner/repo"
+						if parts := strings.SplitN(val, "/", 2); len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+							m.githubRepoAddOwner = parts[0]
+							m.githubRepoAddRepo = parts[1]
+							m.githubRepoAddInputStep = 2
+						} else {
+							m.githubRepoAddOwner = val
+							m.githubRepoAddInputStep = 1
+							m.githubRepoAddInput.SetValue("")
+							m.githubRepoAddInput.Placeholder = "repo name..."
+							return m, nil
+						}
+					}
+					// Step 2: repo input - fetch from API
+					if m.githubRepoAddInputStep == 1 {
+						repo := m.githubRepoAddInput.Value()
+						if repo == "" {
+							return m, nil
+						}
+						m.githubRepoAddRepo = repo
+					}
+
+					// Start fetching
+					if m.githubRepoAddOwner != "" && m.githubRepoAddRepo != "" {
+						owner := m.githubRepoAddOwner
+						repo := m.githubRepoAddRepo
+						m.githubRepoAddMode = false
+						m.githubRepoAddInputMode = false
+						m.githubRepoAddInputStep = 2
+						m.githubRepoAddMsg = "Se están obteniendo los datos..."
+						m.githubRepoAddMsgType = "loading"
+						database := m.database
+						return m, tea.Batch(m.githubRepoAddSpinner.Tick, func() tea.Msg {
+							r, err := apps.FetchRepoMetadata(fmt.Sprintf("https://github.com/%s/%s", owner, repo))
+							if err != nil {
+								return addRepoDoneMsg{success: false, msg: err.Error()}
+							}
+							if err := database.UpsertGitHubRepo(*r); err != nil {
+								return addRepoDoneMsg{success: false, msg: err.Error()}
+							}
+							return addRepoDoneMsg{success: true, msg: "Datos obtenidos"}
+						})
+					}
+				case "esc":
+					m.githubRepoAddMode = false
+					m.githubRepoAddInputMode = false
+					m.githubRepoAddMsg = ""
+					m.githubRepoAddMsgType = ""
+					m.githubRepoAddOwner = ""
+					m.githubRepoAddRepo = ""
+					m.githubRepoAddInputStep = 0
+					m.githubRepoAddInput.SetValue("")
+					m.githubRepoAddInput.Placeholder = "owner or repo..."
+					return m, nil
+				default:
+					m.githubRepoAddInput, cmd = m.githubRepoAddInput.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// Priority 2: filter text input
+			if m.githubRepoInputMode {
+				switch msg.String() {
+				case "enter":
+					m.githubRepoFilter = m.githubRepoInput.Value()
+					m.githubRepoInputMode = false
+					m.githubRepoCursor = 0
+					m = applyGitHubRepoFilter(m)
+					m = updateGitHubRepoPreview(m)
+					return m, nil
+				case "esc":
+					m.githubRepoInputMode = false
+					return m, nil
+				default:
+					m.githubRepoInput, cmd = m.githubRepoInput.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// Priority 3: add repo done/error message
+			if m.githubRepoAddInputStep == 2 {
+				switch msg.String() {
+				case "enter", "y":
+					m.githubRepoAddInputStep = 0
+					m.githubRepoAddMsg = ""
+					m.githubRepoAddMsgType = ""
+					m.githubRepoAddInput.SetValue("")
+					m.githubRepoAddInput.Placeholder = "owner or repo..."
+					m = applyGitHubRepoFilter(m)
+					m = updateGitHubRepoPreview(m)
+					return m, tea.Batch(m.spinner.Tick, fetchGitHubReposCmd(m.database))
+				case "esc", "q":
+					m.githubRepoAddInputStep = 0
+					m.githubRepoAddMsg = ""
+					m.githubRepoAddMsgType = ""
+					m.githubRepoAddInput.SetValue("")
+					m.githubRepoAddInput.Placeholder = "owner or repo..."
+					return m, nil
+				}
+			}
+
+			// Priority 3: preview panel focused
+			if m.githubRepoPreviewFocus {
+				switch msg.String() {
+				case "tab":
+					m.githubRepoPreviewFocus = false
+					return m, nil
+				case "esc", "q":
+					m.githubRepoPreviewFocus = false
+					return m, nil
+				default:
+					m.githubRepoPreviewVP, cmd = m.githubRepoPreviewVP.Update(msg)
+					return m, cmd
+				}
+			}
+
+			// Priority 3: table navigation / filters
+			switch msg.String() {
+			case "esc", "q":
+				m.state = stateAppsMenu
+				return m, nil
+			case "/":
+				m.githubRepoInput.SetValue(m.githubRepoFilter)
+				m.githubRepoInput.Focus()
+				m.githubRepoInputMode = true
+				return m, nil
+			case "tab":
+				m.githubRepoPreviewFocus = !m.githubRepoPreviewFocus
+				return m, nil
+			case "up", "k":
+				if m.githubRepoCursor > 0 {
+					m.githubRepoCursor--
+					m = updateGitHubRepoPreview(m)
+				}
+			case "down", "j":
+				if m.githubRepoCursor < n-1 {
+					m.githubRepoCursor++
+					m = updateGitHubRepoPreview(m)
+				}
+			case "left", "h":
+				m.githubRepoSortField = (m.githubRepoSortField + 4) % 5
+				m.githubRepoCursor = 0
+				m = applyGitHubRepoFilter(m)
+				m = updateGitHubRepoPreview(m)
+			case "right", "l":
+				m.githubRepoSortField = (m.githubRepoSortField + 1) % 5
+				m.githubRepoCursor = 0
+				m = applyGitHubRepoFilter(m)
+				m = updateGitHubRepoPreview(m)
+			case "s":
+				m.githubRepoSortAsc = !m.githubRepoSortAsc
+				m.githubRepoCursor = 0
+				m = applyGitHubRepoFilter(m)
+				m = updateGitHubRepoPreview(m)
+			case "a":
+				m.githubRepoShowAddedCol = !m.githubRepoShowAddedCol
+				m = updateGitHubRepoPreview(m)
+			case "n":
+				m.githubRepoAddMode = true
+				m.githubRepoAddInputMode = true
+				m.githubRepoAddInputStep = 0
+				m.githubRepoAddOwner = ""
+				m.githubRepoAddRepo = ""
+				m.githubRepoAddMsg = ""
+				m.githubRepoAddMsgType = ""
+				m.githubRepoAddInput.SetValue("")
+				m.githubRepoAddInput.Placeholder = "owner (e.g. microsoft)"
+				m.githubRepoAddInput.Focus()
+				return m, nil
+			case "r":
+				m.githubRepoFilter = ""
+				m.githubRepoInput.SetValue("")
+				m.githubRepoCursor = 0
+				m.githubRepoSortField = sortRepoByName
+				m.githubRepoSortAsc = true
+				m.githubRepoShowAddedCol = false
+				m = applyGitHubRepoFilter(m)
+				m = updateGitHubRepoPreview(m)
+				return m, tea.Batch(m.spinner.Tick, fetchGitHubReposCmd(m.database))
 			}
 			return m, nil
 		}
@@ -1157,6 +1373,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stateVSCodeInfo, stateVSCodeMenu, stateVSCodeProfiles, stateVSCodeHistory:
 				m.state = stateVSCodeMenu
 				return m, nil
+			case stateGitHubRepos:
+				m.state = stateAppsMenu
+				return m, nil
 			}
 		case "enter":
 			switch m.state {
@@ -1241,6 +1460,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		} else if m.servicesFocusPanel == 2 {
 			m.servicesLogsVP, cmd = m.servicesLogsVP.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	case stateGitHubRepos:
+		if m.githubRepoAddInputMode {
+			m.githubRepoAddInput, cmd = m.githubRepoAddInput.Update(msg)
+			cmds = append(cmds, cmd)
+		} else if m.githubRepoInputMode {
+			m.githubRepoInput, cmd = m.githubRepoInput.Update(msg)
+			cmds = append(cmds, cmd)
+		} else if m.githubRepoPreviewFocus {
+			m.githubRepoPreviewVP, cmd = m.githubRepoPreviewVP.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -1666,6 +1896,46 @@ func applyDotfileFilter(m Model) Model {
 	return m
 }
 
+// applyGitHubRepoFilter applies the current filter and sort to m.githubRepoItems,
+// storing the result in m.githubRepoFiltered.
+func applyGitHubRepoFilter(m Model) Model {
+	filter := strings.ToLower(m.githubRepoFilter)
+	var filtered []db.GitHubRepo
+	for _, r := range m.githubRepoItems {
+		if filter != "" &&
+			!strings.Contains(strings.ToLower(r.Name), filter) &&
+			!strings.Contains(strings.ToLower(r.Organization), filter) &&
+			!strings.Contains(strings.ToLower(r.Category), filter) &&
+			!strings.Contains(strings.ToLower(r.Description), filter) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+
+	sort.SliceStable(filtered, func(i, j int) bool {
+		var less bool
+		switch m.githubRepoSortField {
+		case sortRepoByStars:
+			less = filtered[i].Stars < filtered[j].Stars
+		case sortRepoByUpdated:
+			less = filtered[i].UpdatedAt.Before(filtered[j].UpdatedAt)
+		case sortRepoByCategory:
+			less = filtered[i].Category < filtered[j].Category
+		case sortRepoByLanguage:
+			less = filtered[i].Language < filtered[j].Language
+		default: // sortRepoByName
+			less = filtered[i].Name < filtered[j].Name
+		}
+		if m.githubRepoSortAsc {
+			return less
+		}
+		return !less
+	})
+
+	m.githubRepoFiltered = filtered
+	return m
+}
+
 type editorFinishedMsg struct {
 	err error
 }
@@ -1894,6 +2164,17 @@ func (m Model) dispatchAppsCmd(title string) (tea.Model, tea.Cmd) {
 		m.vscodeList.SetSize(m.width, m.height)
 		return m, nil
 
+	case "Git Repo Tracker":
+		m.state = stateLoading
+		m.loadingText = "Loading GitHub repos..."
+		m.githubRepoCursor = 0
+		m.githubRepoFilter = ""
+		m.githubRepoInput.SetValue("")
+		m.githubRepoInputMode = false
+		m.githubRepoShowAddedCol = false
+		database := m.database
+		return m, tea.Batch(m.spinner.Tick, fetchGitHubReposCmd(database))
+
 	default:
 		m.result = fmt.Sprintf("Unknown application command: %q", title)
 		m.state = stateResult
@@ -1929,6 +2210,25 @@ type vscodeRefreshDoneMsg struct {
 type vscodeDepsMsg struct {
 	deps        []apps.VSCodeExtAgg
 	lastRefresh time.Time
+}
+
+type githubReposMsg struct {
+	repos []db.GitHubRepo
+}
+
+type addRepoDoneMsg struct {
+	success bool
+	msg     string
+}
+
+func fetchGitHubReposCmd(database *db.DB) tea.Cmd {
+	return func() tea.Msg {
+		repos, err := database.GetGitHubRepos("", "name", true, -1, 0)
+		if err != nil {
+			return errMsg(err)
+		}
+		return githubReposMsg{repos: repos}
+	}
 }
 
 // dispatchVSCodeCmd handles choices inside the VSCode submenu
@@ -2310,3 +2610,64 @@ func updateVSCodeDepsPreview(m Model) Model {
 	return m
 }
 
+// ─── GitHub Repo Tracker helpers ──────────────────────────────────────────────
+
+func updateGitHubRepoPreview(m Model) Model {
+	if len(m.githubRepoFiltered) == 0 || m.githubRepoCursor < 0 || m.githubRepoCursor >= len(m.githubRepoFiltered) {
+		m.githubRepoPreviewVP.SetContent("")
+		return m
+	}
+
+	r := m.githubRepoFiltered[m.githubRepoCursor]
+	var sb strings.Builder
+
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render("REPO: " + r.Name))
+	sb.WriteString("\n")
+	if r.Organization != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Organization: ") + r.Organization + "\n")
+	}
+	if r.URL != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("URL: ") + r.URL + "\n")
+	}
+	if r.Language != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Language: ") + r.Language + "\n")
+	}
+	sb.WriteString(fmt.Sprintf("%s  %d\n", lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Stars: "), r.Stars))
+	if r.Category != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Category: ") + r.Category + "\n")
+	}
+	if r.Source != "" {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Source: ") + r.Source + "\n")
+	}
+	if !r.UpdatedAt.IsZero() {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Updated: ") + r.UpdatedAt.Local().Format("2006-01-02") + "\n")
+	}
+	if !r.FirstCommit.IsZero() {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("First commit: ") + r.FirstCommit.Local().Format("2006-01-02") + "\n")
+	}
+	if r.SizeBytes > 0 {
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Size: ") + fmt.Sprintf("%d KB", r.SizeBytes/1024) + "\n")
+	}
+	if r.Notes != "" {
+		sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render("NOTES:") + "\n")
+		sb.WriteString(r.Notes + "\n")
+	}
+	if r.Description != "" {
+		sb.WriteString("\n" + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render("DESCRIPTION:") + "\n")
+		sb.WriteString(r.Description + "\n")
+	}
+
+	const leftWidth = 35
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+	m.githubRepoPreviewVP.SetWidth(previewWidth - 2)
+	m.githubRepoPreviewVP.SetHeight(m.height - 12)
+
+	wrapped := WordWrap(sb.String(), previewWidth-4)
+	m.githubRepoPreviewVP.SetContent(wrapped)
+	m.githubRepoPreviewVP.GotoTop()
+
+	return m
+}

@@ -26,18 +26,19 @@ const (
 	stateLoading
 	stateResult
 	stateBrewLogs
-	stateUnstaged     // interactive unstaged packages screen
-	stateBrewVersion  // installed package version table
-	stateUpgradePkgs  // select and upgrade specific packages screen
-	stateHomeMenu     // home sub-menu (Explain / Reload)
-	stateHomeDotfiles // home dotfiles table
-	stateBrewServices // services management panel
-	stateAppsMenu     // apps sub-menu
-	stateVSCodeInfo   // vscode installation summary screen
-	stateVSCodeMenu   // vscode sub-menu (Summary/Profiles/History/Refresh)
+	stateUnstaged       // interactive unstaged packages screen
+	stateBrewVersion    // installed package version table
+	stateUpgradePkgs    // select and upgrade specific packages screen
+	stateHomeMenu       // home sub-menu (Explain / Reload)
+	stateHomeDotfiles   // home dotfiles table
+	stateBrewServices   // services management panel
+	stateAppsMenu       // apps sub-menu
+	stateVSCodeInfo     // vscode installation summary screen
+	stateVSCodeMenu     // vscode sub-menu (Summary/Profiles/History/Refresh)
 	stateVSCodeProfiles // vscode profiles interactive panel
 	stateVSCodeHistory  // vscode refresh history diffs panel
 	stateVSCodeDeps     // vscode aggregated dependencies screen
+	stateGitHubRepos    // github repo tracker table
 )
 
 // versionSortField identifies which column is used for sorting the version table.
@@ -59,6 +60,17 @@ const (
 	sortDFByTool
 	sortDFByModified
 	sortDFByCreated
+)
+
+// githubRepoSortField identifies which column is used for sorting the GitHub repos table.
+type githubRepoSortField int
+
+const (
+	sortRepoByName githubRepoSortField = iota
+	sortRepoByCategory
+	sortRepoByLanguage
+	sortRepoByStars
+	sortRepoByUpdated
 )
 
 const (
@@ -160,26 +172,26 @@ type Model struct {
 	previewViewport       viewport.Model  // viewport for scrollable preview pane
 
 	// Services state
-	servicesItems          []brew.Service
-	servicesCursor         int
-	servicesInfoVP         viewport.Model
-	servicesLogsVP         viewport.Model
-	servicesFocusPanel     int    // 0=list, 1=info, 2=logs
-	servicesLogsContent    string // cached full (unfiltered) log content
+	servicesItems       []brew.Service
+	servicesCursor      int
+	servicesInfoVP      viewport.Model
+	servicesLogsVP      viewport.Model
+	servicesFocusPanel  int    // 0=list, 1=info, 2=logs
+	servicesLogsContent string // cached full (unfiltered) log content
 	// Confirmation popup
-	servicesConfirmMode    bool   // true = popup visible
-	servicesConfirmAction  string // "start"|"stop"|"restart"|"kill"
+	servicesConfirmMode   bool   // true = popup visible
+	servicesConfirmAction string // "start"|"stop"|"restart"|"kill"
 	// Log streaming
-	servicesStreamProc     *os.Process // running tail -f process, nil if stopped
-	servicesLogsStreaming   bool        // true when streaming is active
+	servicesStreamProc    *os.Process // running tail -f process, nil if stopped
+	servicesLogsStreaming bool        // true when streaming is active
 	// Log filter
 	servicesLogsFilter     string
 	servicesLogsFilterMode bool
 	servicesLogsInput      textinput.Model
 	// Log size (computed on demand via Z key)
-	servicesLogSize        string // human-readable, e.g. "1.2 MB", empty until computed
+	servicesLogSize string // human-readable, e.g. "1.2 MB", empty until computed
 	// Log paths (cached from last fetch)
-	servicesLogPaths       []string
+	servicesLogPaths []string
 
 	// Apps state
 	appsList                list.Model
@@ -203,6 +215,29 @@ type Model struct {
 	vscodeDepsInput         textinput.Model
 	vscodeDepsInputMode     bool
 	vscodeDepsShowLong      bool
+
+	// GitHub Repo Tracker state
+	githubRepoItems        []db.GitHubRepo
+	githubRepoFiltered     []db.GitHubRepo
+	githubRepoCursor       int
+	githubRepoFilter       string
+	githubRepoSortField    githubRepoSortField
+	githubRepoSortAsc      bool
+	githubRepoInput        textinput.Model
+	githubRepoInputMode    bool
+	githubRepoShowAddedCol bool
+	githubRepoPreviewVP    viewport.Model
+	githubRepoPreviewFocus bool
+	// Add repo overlay
+	githubRepoAddMode      bool
+	githubRepoAddOwner     string
+	githubRepoAddRepo      string
+	githubRepoAddInput     textinput.Model
+	githubRepoAddInputMode bool
+	githubRepoAddInputStep int // 0=owner, 1=repo, 2=done
+	githubRepoAddMsg       string
+	githubRepoAddMsgType   string // "loading", "success", "error"
+	githubRepoAddSpinner   spinner.Model
 }
 
 // styles
@@ -240,6 +275,7 @@ func New(brewfilePath string, database *db.DB) Model {
 
 	appsItems := []list.Item{
 		menuItem{title: "VSCode", desc: "Manage and view configurations of VSCode"},
+		menuItem{title: "Git Repo Tracker", desc: "Track and manage Git repositories"},
 	}
 	al := list.New(appsItems, list.NewDefaultDelegate(), 0, 0)
 	al.Title = "Applications"
@@ -331,6 +367,22 @@ func New(brewfilePath string, database *db.DB) Model {
 	vdi.CharLimit = 60
 	vdi.SetWidth(30)
 
+	gri := textinput.New()
+	gri.Placeholder = "filter repos..."
+	gri.CharLimit = 60
+	gri.SetWidth(40)
+
+	grai := textinput.New()
+	grai.Placeholder = "owner or repo..."
+	grai.CharLimit = 80
+	grai.SetWidth(30)
+
+	grs := spinner.New()
+	grs.Spinner = spinner.Dot
+	grs.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	grpv := viewport.New()
+
 	return Model{
 		state:                 stateMainMenu,
 		returnState:           stateMainMenu,
@@ -364,6 +416,12 @@ func New(brewfilePath string, database *db.DB) Model {
 		vscodeHistoryDetailVP: viewport.New(),
 		vscodeDepsVP:          viewport.New(),
 		vscodeDepsInput:       vdi,
+		githubRepoInput:       gri,
+		githubRepoSortField:   sortRepoByName,
+		githubRepoSortAsc:     true,
+		githubRepoPreviewVP:   grpv,
+		githubRepoAddInput:    grai,
+		githubRepoAddSpinner:  grs,
 	}
 }
 

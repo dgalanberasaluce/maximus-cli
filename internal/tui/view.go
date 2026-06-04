@@ -64,6 +64,13 @@ func (m Model) View() tea.View {
 	case stateVSCodeDeps:
 		content = m.renderVSCodeDeps()
 
+	case stateGitHubRepos:
+		if m.githubRepoAddMode || m.githubRepoAddInputStep == 2 {
+			content = m.renderGitHubRepoAddOverlay()
+		} else {
+			content = m.renderGitHubRepos()
+		}
+
 	default: // stateMainMenu
 		content = m.mainList.View()
 	}
@@ -956,7 +963,7 @@ func (m Model) renderVSCodeInfo() string {
 
 	// Paths Configured
 	sb.WriteString(headerStyle.Render("  📂 Paths Configurados") + "\n")
-	sb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 80)) + "\n")
+	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 80)) + "\n")
 	for _, p := range m.vscodeSummary.Paths {
 		badge := helpStyle.Render("[ ] Inexistente")
 		if p.Exists {
@@ -996,7 +1003,7 @@ func (m Model) renderVSCodeProfiles() string {
 	// 1. Render Left Column (Profile List)
 	var leftSb strings.Builder
 	leftSb.WriteString("  " + headerStyle.Render("PERFILES") + "\n")
-	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 26)) + "\n")
+	leftSb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 26)) + "\n")
 
 	highlighted := lipgloss.NewStyle().
 		Bold(true).
@@ -1067,7 +1074,7 @@ func (m Model) renderVSCodeHistory() string {
 	// 1. Render Left Column (Dates List)
 	var leftSb strings.Builder
 	leftSb.WriteString("  " + headerStyle.Render("FECHAS") + "\n")
-	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 20)) + "\n")
+	leftSb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 20)) + "\n")
 
 	highlighted := lipgloss.NewStyle().
 		Bold(true).
@@ -1140,7 +1147,7 @@ func (m Model) renderVSCodeDeps() string {
 	// 1. Render Left Column (Dependency List)
 	var leftSb strings.Builder
 	leftSb.WriteString("  " + headerStyle.Render("DEPENDENCIAS") + "\n")
-	leftSb.WriteString(helpStyle.Render("  " + strings.Repeat("─", 32)) + "\n")
+	leftSb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 32)) + "\n")
 
 	// Render filter input if active or has value
 	if m.vscodeDepsInputMode || m.vscodeDepsInput.Value() != "" {
@@ -1222,3 +1229,271 @@ func (m Model) renderVSCodeDeps() string {
 	return sb.String()
 }
 
+// renderGitHubRepos renders the GitHub repository tracker table with side-by-side preview.
+func (m Model) renderGitHubRepos() string {
+	var sb strings.Builder
+
+	sb.WriteString("\n")
+	sb.WriteString(headerStyle.Render("  Git Repo Tracker"))
+	sb.WriteString("\n\n")
+
+	// ── Filter bar ──────────────────────────────────────────────────────────
+	if m.githubRepoInputMode {
+		sb.WriteString("  Filter: " + m.githubRepoInput.View() + "\n")
+		sb.WriteString(helpStyle.Render("  enter to apply · esc to cancel") + "\n\n")
+	} else {
+		label := "  Filter: "
+		if m.githubRepoFilter != "" {
+			label += warningStyle.Render("[" + m.githubRepoFilter + "]")
+		} else {
+			label += helpStyle.Render("none")
+		}
+		sb.WriteString(label + "\n\n")
+	}
+
+	if len(m.githubRepoFiltered) == 0 {
+		sb.WriteString("  No repositories found.\n")
+	} else {
+		const chromeHeight = 12
+		maxRows := m.height - chromeHeight
+		if maxRows < 1 {
+			maxRows = 1
+		}
+
+		start := 0
+		if len(m.githubRepoFiltered) > maxRows {
+			start = m.githubRepoCursor - (maxRows / 2)
+			if start < 0 {
+				start = 0
+			}
+			if start+maxRows > len(m.githubRepoFiltered) {
+				start = len(m.githubRepoFiltered) - maxRows
+			}
+		}
+		end := start + maxRows
+		if end > len(m.githubRepoFiltered) {
+			end = len(m.githubRepoFiltered)
+		}
+
+		// 1. Render Table
+		tableStr := githubRepoTableRows(m.githubRepoFiltered[start:end], m.githubRepoSortField, m.githubRepoSortAsc, m.githubRepoCursor-start, m.githubRepoShowAddedCol)
+
+		// 2. Render Preview Panel
+		const minTableWidth = 38
+		previewWidth := m.width - minTableWidth - 4
+		if previewWidth < 25 {
+			previewWidth = 25
+		}
+
+		borderCol := "240"
+		if m.githubRepoPreviewFocus {
+			borderCol = "212"
+		}
+		previewStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color(borderCol)).
+			Padding(0, 1).
+			Width(previewWidth).
+			Height(maxRows + 1)
+
+		previewPanel := previewStyle.Render(m.githubRepoPreviewVP.View())
+
+		// Combine horizontally
+		sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, tableStr, "  ", previewPanel))
+	}
+
+	// ── Stats line ───────────────────────────────────────────────────────────
+	sb.WriteString(helpStyle.Render(fmt.Sprintf(
+		"  Showing %d of %d repositories",
+		len(m.githubRepoFiltered), len(m.githubRepoItems),
+	)))
+	sb.WriteString("\n")
+
+	// ── Key hints ────────────────────────────────────────────────────────────
+	sb.WriteString(helpStyle.Render(
+		"  ↑/↓ navigate · ←/→ sort col · s sort order · / filter · a added col · n new · r refresh · q back",
+	))
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+// sortLabelGH returns the column label with a sort indicator when active.
+func sortLabelGH(col, active githubRepoSortField, asc bool, label string, width int) string {
+	if col != active {
+		return fmt.Sprintf("%-*s", width, label)
+	}
+	indicator := "↑"
+	if !asc {
+		indicator = "↓"
+	}
+	return fmt.Sprintf("%-*s", width, label+" "+indicator)
+}
+
+// githubRepoTableRows formats the filtered GitHub repos as a fixed-width table string.
+func githubRepoTableRows(items []db.GitHubRepo, sortField githubRepoSortField, sortAsc bool, cursor int, showAdded bool) string {
+	var sb strings.Builder
+
+	// Column widths.
+	const nameW, orgW, catW, langW, starsW, updatedW = 28, 20, 14, 14, 8, 12
+
+	// Header
+	var header string
+	if showAdded {
+		header = fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+			nameW, sortLabelGH(sortRepoByName, sortField, sortAsc, "NAME", nameW),
+			orgW, sortLabelGH(sortRepoByName, sortField, sortAsc, "ORG", orgW),
+			catW, sortLabelGH(sortRepoByCategory, sortField, sortAsc, "CATEGORY", catW),
+			langW, sortLabelGH(sortRepoByLanguage, sortField, sortAsc, "LANGUAGE", langW),
+			starsW, sortLabelGH(sortRepoByStars, sortField, sortAsc, "STARS", starsW),
+			updatedW, sortLabelGH(sortRepoByUpdated, sortField, sortAsc, "UPDATED", updatedW),
+			"ADDED",
+		)
+	} else {
+		header = fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+			nameW, sortLabelGH(sortRepoByName, sortField, sortAsc, "NAME", nameW),
+			orgW, sortLabelGH(sortRepoByName, sortField, sortAsc, "ORG", orgW),
+			catW, sortLabelGH(sortRepoByCategory, sortField, sortAsc, "CATEGORY", catW),
+			langW, sortLabelGH(sortRepoByLanguage, sortField, sortAsc, "LANGUAGE", langW),
+			starsW, sortLabelGH(sortRepoByStars, sortField, sortAsc, "STARS", starsW),
+			sortLabelGH(sortRepoByUpdated, sortField, sortAsc, "UPDATED", updatedW),
+		)
+	}
+	sb.WriteString(headerStyle.Render(header) + "\n")
+
+	totalW := nameW + orgW + catW + langW + starsW + updatedW
+	if showAdded {
+		totalW += 12
+	}
+	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", totalW)) + "\n")
+
+	highlighted := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("212"))
+
+	for i, r := range items {
+		updated := "—"
+		if !r.UpdatedAt.IsZero() {
+			updated = r.UpdatedAt.Format("2006-01-02")
+		}
+		added := "—"
+		if showAdded && !r.AddedAt.IsZero() {
+			added = r.AddedAt.Format("2006-01-02")
+		}
+
+		var row string
+		if showAdded {
+			row = fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+				nameW, truncate(r.Name, nameW),
+				orgW, truncate(r.Organization, orgW),
+				catW, truncate(r.Category, catW),
+				langW, truncate(r.Language, langW),
+				starsW, fmt.Sprintf("%d", r.Stars),
+				updatedW, updated,
+				added,
+			)
+		} else {
+			row = fmt.Sprintf("  %-*s  %-*s  %-*s  %-*s  %-*s  %s",
+				nameW, truncate(r.Name, nameW),
+				orgW, truncate(r.Organization, orgW),
+				catW, truncate(r.Category, catW),
+				langW, truncate(r.Language, langW),
+				starsW, fmt.Sprintf("%d", r.Stars),
+				updated,
+			)
+		}
+		if i == cursor {
+			row = highlighted.Render(row)
+		}
+		sb.WriteString(row + "\n")
+	}
+	return sb.String()
+}
+
+// renderGitHubRepoAddOverlay renders the add repo overlay panel composited on top of the main view.
+func (m Model) renderGitHubRepoAddOverlay() string {
+	// Render the background table so it remains visible
+	bg := m.renderGitHubRepos()
+
+	overlayW := 55
+	overlayH := 14
+	leftPad := (m.width - overlayW - 4) / 2
+	topPad := (m.height - overlayH - 2) / 2
+	if leftPad < 0 {
+		leftPad = 0
+	}
+	if topPad < 0 {
+		topPad = 0
+	}
+
+	var content strings.Builder
+	content.WriteString("\n")
+
+	// Header
+	content.WriteString("  " + headerStyle.Render("Add New Repository") + "\n\n")
+
+	if m.githubRepoAddInputStep == 0 {
+		// Step 0: Enter owner (or owner/repo)
+		content.WriteString("  " + helpStyle.Render("Enter owner or owner/repo:") + "\n")
+		content.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Owner:") + "\n")
+		content.WriteString("  " + m.githubRepoAddInput.View() + "\n\n")
+		content.WriteString(helpStyle.Render("  enter to continue · esc to cancel"))
+	} else if m.githubRepoAddInputStep == 1 {
+		// Step 1: Enter repo name
+		content.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Owner:") + " " + warningStyle.Render(m.githubRepoAddOwner) + "\n\n")
+		content.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("Repo:") + "\n")
+		content.WriteString("  " + m.githubRepoAddInput.View() + "\n\n")
+		content.WriteString(helpStyle.Render("  enter to fetch · esc to cancel"))
+	} else if m.githubRepoAddInputStep == 2 {
+		// Step 2: Loading or result
+		if m.githubRepoAddMsgType == "loading" {
+			content.WriteString("  " + m.githubRepoAddSpinner.View() + " " + m.githubRepoAddMsg + "\n\n")
+			content.WriteString(helpStyle.Render("  please wait..."))
+		} else if m.githubRepoAddMsgType == "success" {
+			content.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render("✓ "+m.githubRepoAddMsg) + "\n\n")
+			content.WriteString(helpStyle.Render("  enter to continue"))
+		} else if m.githubRepoAddMsgType == "error" {
+			content.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render("✕ "+m.githubRepoAddMsg) + "\n\n")
+			content.WriteString(helpStyle.Render("  enter to continue · esc to cancel"))
+		}
+	}
+
+	// Render overlay panel with rounded border
+	panel := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("212")).
+		Padding(1, 2).
+		Width(overlayW).
+		Height(overlayH).
+		Render(content.String())
+
+	// Composite the overlay on top of the background
+	// Build the result by overlaying the panel onto the bg lines
+	bgLines := strings.Split(bg, "\n")
+	panelLines := strings.Split(panel, "\n")
+
+	// Ensure bg has enough lines
+	for len(bgLines) < topPad+len(panelLines) {
+		bgLines = append(bgLines, "")
+	}
+
+	for i, pLine := range panelLines {
+		row := topPad + i
+		if row >= len(bgLines) {
+			bgLines = append(bgLines, "")
+		}
+		bgLine := bgLines[row]
+		// Pad bgLine to leftPad if shorter
+		for len(bgLine) < leftPad {
+			bgLine += " "
+		}
+		// Replace from leftPad with the panel line
+		if leftPad <= len(bgLine) {
+			bgLines[row] = bgLine[:leftPad] + pLine
+		} else {
+			bgLines[row] = strings.Repeat(" ", leftPad) + pLine
+		}
+	}
+
+	return strings.Join(bgLines, "\n")
+}

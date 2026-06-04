@@ -39,6 +39,8 @@ const (
 	stateVSCodeHistory  // vscode refresh history diffs panel
 	stateVSCodeDeps     // vscode aggregated dependencies screen
 	stateGitHubRepos    // github repo tracker table
+	stateGitRepoMenu    // sub-menu list for Git Repo Tracker
+	stateRepoTracker    // stars growth graph panel
 )
 
 // versionSortField identifies which column is used for sorting the version table.
@@ -245,6 +247,22 @@ type Model struct {
 	githubRepoCatCursor     int             // highlighted option index
 	githubRepoCatNewInput   textinput.Model // text input for custom category
 	githubRepoCatNewMode    bool            // true when "(new…)" is selected, typing mode
+
+	// Git Repo Tracker sub-menu
+	gitRepoMenuList list.Model
+
+	// Repo Tracker panel state
+	repoTrackerItems      []db.GitHubRepo
+	repoTrackerFiltered   []db.GitHubRepo
+	repoTrackerCursor     int
+	repoTrackerHistory    []db.StarSnapshot
+	repoTrackerLastAt     time.Time
+	repoTrackerLastID     int64
+	repoTrackerRefreshing bool
+	repoTrackerInput      textinput.Model
+	repoTrackerInputMode  bool
+	repoTrackerGraphVP    viewport.Model
+	repoTrackerFilter     string
 }
 
 // styles
@@ -395,6 +413,22 @@ func New(brewfilePath string, database *db.DB) Model {
 	grcni.CharLimit = 60
 	grcni.SetWidth(36)
 
+	gitRepoItems := []list.Item{
+		menuItem{title: "Summary", desc: "Show repository overview and details"},
+		menuItem{title: "Repo Tracker", desc: "Track star growth over time with graphs"},
+	}
+	grl := list.New(gitRepoItems, list.NewDefaultDelegate(), 0, 0)
+	grl.Title = "Git Repo Tracker Options"
+	grl.SetShowStatusBar(false)
+
+	rtInput := textinput.New()
+	rtInput.Placeholder = "filter repos..."
+	rtInput.CharLimit = 60
+	rtInput.SetWidth(30)
+
+	rtvp := viewport.New()
+	rtvp.Style = lipgloss.NewStyle().Padding(1, 2)
+
 	return Model{
 		state:                 stateMainMenu,
 		returnState:           stateMainMenu,
@@ -435,6 +469,9 @@ func New(brewfilePath string, database *db.DB) Model {
 		githubRepoAddInput:    grai,
 		githubRepoAddSpinner:  grs,
 		githubRepoCatNewInput: grcni,
+		gitRepoMenuList:       grl,
+		repoTrackerInput:      rtInput,
+		repoTrackerGraphVP:    rtvp,
 	}
 }
 

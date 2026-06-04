@@ -24,6 +24,13 @@ type GitHubRepo struct {
 	AddedAt      time.Time
 }
 
+type StarSnapshot struct {
+	ID        int64
+	RepoID    int64
+	Stars     int
+	SampledAt time.Time
+}
+
 func (d *DB) migrateGitHubRepos() error {
 	q := `CREATE TABLE IF NOT EXISTS github_repos (
 		id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,6 +65,28 @@ func (d *DB) migrateGitHubRepos() error {
 	return nil
 }
 
+type RepoRef struct {
+	ID  int64
+	URL string
+}
+
+func (d *DB) GetRepoRefs() ([]RepoRef, error) {
+	rows, err := d.conn.Query(`SELECT id, url FROM github_repos ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("db: get repo refs: %w", err)
+	}
+	defer rows.Close()
+	var refs []RepoRef
+	for rows.Next() {
+		var ref RepoRef
+		if err := rows.Scan(&ref.ID, &ref.URL); err != nil {
+			return nil, fmt.Errorf("db: scan repo ref %d: %w", ref.ID, err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
 func (d *DB) UpsertGitHubRepo(r GitHubRepo) error {
 	_, err := d.conn.Exec(
 		`INSERT INTO github_repos(url, name, organization, description, language, stars, updated_at, first_commit, size_bytes, category, source, notes, added_at)
@@ -71,9 +100,9 @@ func (d *DB) UpsertGitHubRepo(r GitHubRepo) error {
 		 	updated_at=excluded.updated_at,
 		 	first_commit=excluded.first_commit,
 		 	size_bytes=excluded.size_bytes,
-		 	category=excluded.category,
-		 	source=excluded.source,
-		 	notes=excluded.notes`,
+		 	category=CASE WHEN excluded.category != '' THEN excluded.category ELSE github_repos.category END,
+		 	source=CASE WHEN excluded.source != '' AND excluded.source != 'manual' THEN excluded.source ELSE github_repos.source END,
+		 	notes=CASE WHEN excluded.notes != '' THEN excluded.notes ELSE github_repos.notes END`,
 		r.URL, r.Name, r.Organization, r.Description, r.Language, r.Stars,
 		r.UpdatedAt.UTC().Format(time.RFC3339),
 		r.FirstCommit.UTC().Format(time.RFC3339),
@@ -230,4 +259,110 @@ func (d *DB) GetGitHubRepoCategories() ([]string, error) {
 		cats = append(cats, c)
 	}
 	return cats, rows.Err()
+}
+
+func (d *DB) migrateStarHistory() error {
+	q := `CREATE TABLE IF NOT EXISTS github_repo_stars_history (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		repo_id    INTEGER NOT NULL REFERENCES github_repos(id) ON DELETE CASCADE,
+		stars      INTEGER NOT NULL,
+		sampled_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE(repo_id, sampled_at)
+	)`
+	if _, err := d.conn.Exec(q); err != nil {
+		return fmt.Errorf("migration github_repo_stars_history failed: %w", err)
+	}
+
+	if _, err := d.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_stars_history_repo_id ON github_repo_stars_history(repo_id)`); err != nil {
+		return fmt.Errorf("migration idx_stars_history_repo_id failed: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) InsertStarSnapshot(repoID int64, stars int, sampledAt time.Time) error {
+	_, err := d.conn.Exec(
+		`INSERT INTO github_repo_stars_history(repo_id, stars, sampled_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(repo_id, sampled_at) DO UPDATE SET stars=excluded.stars`,
+		repoID, stars, sampledAt.UTC().Format(time.RFC3339),
+	)
+	if err != nil {
+		return fmt.Errorf("db: insert star snapshot for repo %d: %w", repoID, err)
+	}
+	return nil
+}
+
+func (d *DB) GetStarHistory(repoID int64, limit int) ([]StarSnapshot, error) {
+	query := `SELECT id, repo_id, stars, sampled_at FROM github_repo_stars_history WHERE repo_id = ? ORDER BY sampled_at DESC`
+	var rows *sql.Rows
+	var err error
+	if limit > 0 {
+		query += " LIMIT ?"
+		rows, err = d.conn.Query(query, repoID, limit)
+	} else {
+		rows, err = d.conn.Query(query, repoID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db: query star history for repo %d: %w", repoID, err)
+	}
+	defer rows.Close()
+
+	var history []StarSnapshot
+	for rows.Next() {
+		var s StarSnapshot
+		var ts string
+		if err := rows.Scan(&s.ID, &s.RepoID, &s.Stars, &ts); err != nil {
+			return nil, fmt.Errorf("db: scan star history: %w", err)
+		}
+		s.SampledAt, _ = time.Parse(time.RFC3339, ts)
+		history = append(history, s)
+	}
+	return history, rows.Err()
+}
+
+func (d *DB) GetAllRepoIDsOrdered() ([]int64, error) {
+	rows, err := d.conn.Query(`SELECT id FROM github_repos ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("db: get all repo ids: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (d *DB) GetRefreshCursor() (lastID int64, lastAt time.Time, err error) {
+	idStr, err := d.GetSetting("refresh_last_repo_id")
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if idStr != "" {
+		fmt.Sscanf(idStr, "%d", &lastID)
+	}
+
+	atStr, err := d.GetSetting("refresh_last_at")
+	if err != nil {
+		return lastID, time.Time{}, err
+	}
+	if atStr != "" {
+		lastAt, _ = time.Parse(time.RFC3339, atStr)
+	}
+	return lastID, lastAt, nil
+}
+
+func (d *DB) SetRefreshCursor(lastID int64, at time.Time) error {
+	if err := d.SetSetting("refresh_last_repo_id", fmt.Sprintf("%d", lastID)); err != nil {
+		return err
+	}
+	if err := d.SetSetting("refresh_last_at", at.UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	return nil
 }

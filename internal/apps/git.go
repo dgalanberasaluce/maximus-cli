@@ -215,3 +215,80 @@ func NormalizeGitHubURL(raw string) string {
 	}
 	return fmt.Sprintf("https://github.com/%s/%s", owner, repo)
 }
+
+func RefreshStarsWithRateLimit(
+	database *db.DB,
+	lastRepoID int64,
+	maxRequests int,
+) (newLastID int64, wrapped bool, err error) {
+	refs, err := database.GetRepoRefs()
+	if err != nil {
+		return lastRepoID, false, fmt.Errorf("fetch repo refs: %w", err)
+	}
+	if len(refs) == 0 {
+		return 0, false, nil
+	}
+
+	startIndex := 0
+	found := false
+	for i, ref := range refs {
+		if ref.ID == lastRepoID {
+			startIndex = i + 1
+			found = true
+			break
+		}
+	}
+	if startIndex >= len(refs) {
+		startIndex = 0
+		wrapped = true
+	}
+	if !found {
+		startIndex = 0
+	}
+
+	now := time.Now()
+	cursorIndex := startIndex
+	processedCount := 0
+
+	for processedCount < maxRequests {
+		if processedCount > 0 && cursorIndex == startIndex {
+			wrapped = true
+			break
+		}
+
+		ref := refs[cursorIndex]
+
+		meta, fetchErr := FetchRepoMetadata(ref.URL)
+		if fetchErr != nil {
+			errStr := fetchErr.Error()
+			if strings.Contains(strings.ToLower(errStr), "rate limited") || strings.Contains(errStr, "403") || strings.Contains(errStr, "429") {
+				return lastRepoID, wrapped, fetchErr
+			}
+			// Skip this repo for other kinds of errors (e.g. 404), advancing the cursor so we don't get stuck.
+			lastRepoID = ref.ID
+			cursorIndex = (cursorIndex + 1) % len(refs)
+			processedCount++
+			if cursorIndex == 0 {
+				wrapped = true
+			}
+			continue
+		}
+
+		if err := database.UpsertGitHubRepo(*meta); err != nil {
+			return lastRepoID, wrapped, fmt.Errorf("update repo %s: %w", ref.URL, err)
+		}
+
+		if err := database.InsertStarSnapshot(ref.ID, meta.Stars, now); err != nil {
+			return lastRepoID, wrapped, fmt.Errorf("insert star snapshot for %s: %w", ref.URL, err)
+		}
+
+		lastRepoID = ref.ID
+		cursorIndex = (cursorIndex + 1) % len(refs)
+		processedCount++
+		if cursorIndex == 0 {
+			wrapped = true
+		}
+	}
+
+	return lastRepoID, wrapped, nil
+}

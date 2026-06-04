@@ -100,6 +100,10 @@ func (d *DB) migrate() error {
 		return err
 	}
 
+	if err := d.migrateStarHistory(); err != nil {
+		return err
+	}
+
 	return nil
 }
 

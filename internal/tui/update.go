@@ -299,6 +299,44 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = updateGitHubRepoPreview(m)
 		return m, nil
 
+	case repoTrackerLoadedMsg:
+		if msg.err != nil {
+			m.result = fmt.Sprintf("Error loading repo tracker: %s", msg.err)
+			m.state = stateResult
+			return m, nil
+		}
+		m.repoTrackerItems = msg.repos
+		m.repoTrackerFiltered = msg.repos
+		m.repoTrackerLastID = msg.lastID
+		m.repoTrackerLastAt = msg.lastAt
+		m.repoTrackerCursor = 0
+		m.state = stateRepoTracker
+		m = applyRepoTrackerFilter(m)
+
+		var cmd tea.Cmd
+		if len(m.repoTrackerFiltered) > 0 {
+			cmd = fetchStarHistoryCmd(m.database, m.repoTrackerFiltered[0].ID)
+		}
+		return m, cmd
+
+	case starHistoryMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		if len(m.repoTrackerFiltered) > 0 && m.repoTrackerCursor < len(m.repoTrackerFiltered) {
+			if m.repoTrackerFiltered[m.repoTrackerCursor].ID == msg.repoID {
+				m.repoTrackerHistory = msg.history
+			}
+		}
+		return m, nil
+
+	case refreshStarsDoneMsg:
+		m.repoTrackerRefreshing = false
+		m.repoTrackerLastID = msg.newLastID
+		m.repoTrackerLastAt = msg.lastAt
+		// Fetch repo tracker again to reflect updated counts and graph
+		return m, fetchRepoTrackerCmd(m.database)
+
 	case addRepoDoneMsg:
 		m.githubRepoAddMode = false
 		m.githubRepoAddInputMode = false
@@ -1039,6 +1077,75 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// --- Repo Tracker keys ---
+		if m.state == stateRepoTracker {
+			n := len(m.repoTrackerFiltered)
+			var cmd tea.Cmd
+
+			// Priority 1: filter input mode
+			if m.repoTrackerInputMode {
+				switch msg.String() {
+				case "enter":
+					m.repoTrackerInputMode = false
+					m.repoTrackerFilter = m.repoTrackerInput.Value()
+					m = applyRepoTrackerFilter(m)
+					if len(m.repoTrackerFiltered) > 0 {
+						if m.repoTrackerCursor >= len(m.repoTrackerFiltered) {
+							m.repoTrackerCursor = 0
+						}
+						return m, fetchStarHistoryCmd(m.database, m.repoTrackerFiltered[m.repoTrackerCursor].ID)
+					}
+					m.repoTrackerHistory = nil
+					return m, nil
+				case "esc":
+					m.repoTrackerInputMode = false
+					return m, nil
+				default:
+					m.repoTrackerInput, cmd = m.repoTrackerInput.Update(msg)
+					m.repoTrackerFilter = m.repoTrackerInput.Value()
+					m = applyRepoTrackerFilter(m)
+					if len(m.repoTrackerFiltered) > 0 {
+						if m.repoTrackerCursor >= len(m.repoTrackerFiltered) {
+							m.repoTrackerCursor = 0
+						}
+						return m, tea.Batch(cmd, fetchStarHistoryCmd(m.database, m.repoTrackerFiltered[m.repoTrackerCursor].ID))
+					}
+					m.repoTrackerHistory = nil
+					return m, cmd
+				}
+			}
+
+			// Priority 2: normal navigation keys
+			switch msg.String() {
+			case "/":
+				m.repoTrackerInputMode = true
+				m.repoTrackerInput.Focus()
+				m.repoTrackerInput.SetValue(m.repoTrackerFilter)
+				return m, nil
+
+			case "up", "k":
+				if len(m.repoTrackerFiltered) > 0 && m.repoTrackerCursor > 0 {
+					m.repoTrackerCursor--
+					m.repoTrackerHistory = nil
+					return m, fetchStarHistoryCmd(m.database, m.repoTrackerFiltered[m.repoTrackerCursor].ID)
+				}
+
+			case "down", "j":
+				if len(m.repoTrackerFiltered) > 0 && m.repoTrackerCursor < n-1 {
+					m.repoTrackerCursor++
+					m.repoTrackerHistory = nil
+					return m, fetchStarHistoryCmd(m.database, m.repoTrackerFiltered[m.repoTrackerCursor].ID)
+				}
+
+			case "r":
+				if !m.repoTrackerRefreshing {
+					m.repoTrackerRefreshing = true
+					return m, tea.Batch(m.spinner.Tick, refreshStarsCmd(m.database, m.repoTrackerLastID, 60))
+				}
+			}
+			return m, nil
+		}
+
 		// --- Dotfiles table logic ---
 		if m.state == stateHomeDotfiles {
 			// Priority 1: delete confirmation input mode
@@ -1483,8 +1590,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case stateVSCodeInfo, stateVSCodeMenu, stateVSCodeProfiles, stateVSCodeHistory:
 				m.state = stateVSCodeMenu
 				return m, nil
-			case stateGitHubRepos:
+			case stateGitRepoMenu:
 				m.state = stateAppsMenu
+				return m, nil
+			case stateGitHubRepos, stateRepoTracker:
+				m.state = stateGitRepoMenu
 				return m, nil
 			}
 		case "enter":
@@ -1521,12 +1631,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if i, ok := m.vscodeList.SelectedItem().(menuItem); ok {
 					return m.dispatchVSCodeCmd(i.title)
 				}
+			case stateGitRepoMenu:
+				if i, ok := m.gitRepoMenuList.SelectedItem().(menuItem); ok {
+					return m.dispatchGitRepoCmd(i.title)
+				}
 			}
 		}
 	}
 
 	// Delegate navigation updates to the active list/component.
 	switch m.state {
+	case stateGitRepoMenu:
+		m.gitRepoMenuList, cmd = m.gitRepoMenuList.Update(msg)
+		cmds = append(cmds, cmd)
 	case stateMainMenu:
 		m.mainList, cmd = m.mainList.Update(msg)
 		cmds = append(cmds, cmd)
@@ -1581,6 +1698,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		} else if m.githubRepoPreviewFocus {
 			m.githubRepoPreviewVP, cmd = m.githubRepoPreviewVP.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+	case stateRepoTracker:
+		if m.repoTrackerInputMode {
+			m.repoTrackerInput, cmd = m.repoTrackerInput.Update(msg)
+			cmds = append(cmds, cmd)
+		} else {
+			m.repoTrackerGraphVP, cmd = m.repoTrackerGraphVP.Update(msg)
+			cmds = append(cmds, cmd)
+		}
+		if m.repoTrackerRefreshing {
+			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -2275,18 +2404,44 @@ func (m Model) dispatchAppsCmd(title string) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "Git Repo Tracker":
+		m.state = stateGitRepoMenu
+		m.gitRepoMenuList.SetSize(m.width, m.height)
+		return m, nil
+
+	default:
+		m.result = fmt.Sprintf("Unknown application command: %q", title)
+		m.state = stateResult
+		return m, nil
+	}
+}
+
+// dispatchGitRepoCmd handles choices inside the Git Repo Tracker submenu
+func (m Model) dispatchGitRepoCmd(title string) (tea.Model, tea.Cmd) {
+	m.returnState = stateGitRepoMenu
+	database := m.database
+
+	switch title {
+	case "Summary":
 		m.state = stateLoading
-		m.loadingText = "Loading GitHub repos..."
+		m.loadingText = "Loading Git Repos..."
 		m.githubRepoCursor = 0
 		m.githubRepoFilter = ""
 		m.githubRepoInput.SetValue("")
 		m.githubRepoInputMode = false
 		m.githubRepoShowAddedCol = false
-		database := m.database
 		return m, tea.Batch(m.spinner.Tick, fetchGitHubReposCmd(database))
 
+	case "Repo Tracker":
+		m.state = stateLoading
+		m.loadingText = "Loading Repo Tracker..."
+		m.repoTrackerCursor = 0
+		m.repoTrackerFilter = ""
+		m.repoTrackerInput.SetValue("")
+		m.repoTrackerInputMode = false
+		return m, tea.Batch(m.spinner.Tick, fetchRepoTrackerCmd(database))
+
 	default:
-		m.result = fmt.Sprintf("Unknown application command: %q", title)
+		m.result = fmt.Sprintf("Unknown git repo tracker command: %q", title)
 		m.state = stateResult
 		return m, nil
 	}
@@ -2785,5 +2940,87 @@ func updateGitHubRepoPreview(m Model) Model {
 	m.githubRepoPreviewVP.SetContent(wrapped)
 	m.githubRepoPreviewVP.GotoTop()
 
+	return m
+}
+
+type repoTrackerLoadedMsg struct {
+	repos  []db.GitHubRepo
+	lastID int64
+	lastAt time.Time
+	err    error
+}
+
+type starHistoryMsg struct {
+	repoID  int64
+	history []db.StarSnapshot
+	err     error
+}
+
+type refreshStarsDoneMsg struct {
+	newLastID int64
+	lastAt    time.Time
+	wrapped   bool
+	err       error
+}
+
+func fetchRepoTrackerCmd(database *db.DB) tea.Cmd {
+	return func() tea.Msg {
+		repos, err := database.GetGitHubRepos("", "name", true, -1, 0)
+		if err != nil {
+			return repoTrackerLoadedMsg{err: err}
+		}
+		lastID, lastAt, err := database.GetRefreshCursor()
+		if err != nil {
+			return repoTrackerLoadedMsg{repos: repos}
+		}
+		return repoTrackerLoadedMsg{
+			repos:  repos,
+			lastID: lastID,
+			lastAt: lastAt,
+		}
+	}
+}
+
+func fetchStarHistoryCmd(database *db.DB, repoID int64) tea.Cmd {
+	return func() tea.Msg {
+		history, err := database.GetStarHistory(repoID, 30)
+		if err != nil {
+			return starHistoryMsg{repoID: repoID, err: err}
+		}
+		return starHistoryMsg{repoID: repoID, history: history}
+	}
+}
+
+func refreshStarsCmd(database *db.DB, lastID int64, maxRequests int) tea.Cmd {
+	return func() tea.Msg {
+		newLastID, wrapped, err := apps.RefreshStarsWithRateLimit(database, lastID, maxRequests)
+		now := time.Now()
+		if err != nil {
+			if newLastID != lastID {
+				_ = database.SetRefreshCursor(newLastID, now)
+			}
+			return refreshStarsDoneMsg{newLastID: newLastID, lastAt: now, wrapped: wrapped, err: err}
+		}
+		if err := database.SetRefreshCursor(newLastID, now); err != nil {
+			return refreshStarsDoneMsg{newLastID: newLastID, lastAt: now, wrapped: wrapped, err: err}
+		}
+		return refreshStarsDoneMsg{newLastID: newLastID, lastAt: now, wrapped: wrapped}
+	}
+}
+
+func applyRepoTrackerFilter(m Model) Model {
+	m.repoTrackerFiltered = nil
+	filter := strings.ToLower(m.repoTrackerFilter)
+	for _, r := range m.repoTrackerItems {
+		if filter == "" || strings.Contains(strings.ToLower(r.Name), filter) || strings.Contains(strings.ToLower(r.Organization), filter) {
+			m.repoTrackerFiltered = append(m.repoTrackerFiltered, r)
+		}
+	}
+	if m.repoTrackerCursor >= len(m.repoTrackerFiltered) {
+		m.repoTrackerCursor = len(m.repoTrackerFiltered) - 1
+	}
+	if m.repoTrackerCursor < 0 {
+		m.repoTrackerCursor = 0
+	}
 	return m
 }

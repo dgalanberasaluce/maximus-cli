@@ -73,6 +73,12 @@ func (m Model) View() tea.View {
 			content = m.renderGitHubRepos()
 		}
 
+	case stateGitRepoMenu:
+		content = m.gitRepoMenuList.View()
+
+	case stateRepoTracker:
+		content = m.renderRepoTracker()
+
 	default: // stateMainMenu
 		content = m.mainList.View()
 	}
@@ -1608,5 +1614,294 @@ func (m Model) renderGitHubRepoCatPicker() string {
 	}
 
 	return strings.Join(bgLines, "\n")
+}
+
+func (m Model) renderRepoTracker() string {
+	var sb strings.Builder
+
+	sb.WriteString("\n")
+	sb.WriteString("  " + headerStyle.Render("Git Repo Tracker — Star Growth Tracking"))
+	if m.repoTrackerRefreshing {
+		sb.WriteString("  " + m.spinner.View() + helpStyle.Render(" Refreshing..."))
+	}
+	sb.WriteString("\n\n")
+
+	if len(m.repoTrackerItems) == 0 {
+		sb.WriteString("  No repositories tracked in the database.\n\n")
+		sb.WriteString(helpStyle.Render("  (add repositories in the Summary module first)"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// 1. Render Left Column (Repository List)
+	var leftSb strings.Builder
+	leftSb.WriteString("  " + headerStyle.Render("REPOSITORIES") + "\n")
+	leftSb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 32)) + "\n")
+
+	// Render filter input if active or has filter
+	if m.repoTrackerInputMode || m.repoTrackerFilter != "" {
+		leftSb.WriteString("  " + m.repoTrackerInput.View() + "\n\n")
+	}
+
+	highlighted := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("212"))
+
+	if len(m.repoTrackerFiltered) == 0 {
+		leftSb.WriteString("  No matching repositories\n")
+	} else {
+		const chromeHeight = 12
+		maxRows := m.height - chromeHeight
+		if maxRows < 1 {
+			maxRows = 1
+		}
+		start := 0
+		if len(m.repoTrackerFiltered) > maxRows {
+			start = m.repoTrackerCursor - (maxRows / 2)
+			if start < 0 {
+				start = 0
+			}
+			if start+maxRows > len(m.repoTrackerFiltered) {
+				start = len(m.repoTrackerFiltered) - maxRows
+			}
+		}
+		end := start + maxRows
+		if end > len(m.repoTrackerFiltered) {
+			end = len(m.repoTrackerFiltered)
+		}
+
+		for i := start; i < end; i++ {
+			r := m.repoTrackerFiltered[i]
+			orgName := r.Organization
+			if orgName == "" {
+				orgName = "manual"
+			}
+			nameStr := fmt.Sprintf("%s/%s", orgName, r.Name)
+
+			// Format organization and name to fit nicely
+			if len(nameStr) > 22 {
+				nameStr = nameStr[:19] + "..."
+			}
+
+			if i == m.repoTrackerCursor {
+				leftSb.WriteString(highlighted.Render(fmt.Sprintf("▸ %-22s ★ %-5d", nameStr, r.Stars)) + "\n")
+			} else {
+				leftSb.WriteString(fmt.Sprintf("  %-22s ★ %-5d\n", nameStr, r.Stars))
+			}
+		}
+	}
+
+	// 2. Render Right Column (Viewport Detail Graph Panel)
+	const leftWidth = 35
+	previewWidth := m.width - leftWidth - 4
+	if previewWidth < 25 {
+		previewWidth = 25
+	}
+
+	borderColor := "240"
+	if m.repoTrackerRefreshing {
+		borderColor = "212"
+	}
+	previewStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Padding(0, 1).
+		Width(previewWidth).
+		Height(m.height - 8)
+
+	graphContent := m.renderStarGraph(m.repoTrackerHistory, previewWidth, m.height - 8)
+	m.repoTrackerGraphVP.SetWidth(previewWidth - 2)
+	m.repoTrackerGraphVP.SetHeight(m.height - 8)
+	m.repoTrackerGraphVP.SetContent(graphContent)
+
+	previewPanel := previewStyle.Render(m.repoTrackerGraphVP.View())
+
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, leftSb.String(), "  ", previewPanel)
+	sb.WriteString(combined)
+
+	sb.WriteString("\n\n")
+	sb.WriteString(helpStyle.Render("  ↑/↓ navigate · r refresh · / filter · q back"))
+	sb.WriteString("\n")
+
+	lastRefreshStr := "Nunca"
+	if !m.repoTrackerLastAt.IsZero() {
+		lastRefreshStr = m.repoTrackerLastAt.Local().Format("2006-01-02 15:04:05")
+	}
+	sb.WriteString(helpStyle.Render(fmt.Sprintf("  Last refresh: cursor at repo ID %d · timestamp: %s", m.repoTrackerLastID, lastRefreshStr)))
+
+	return sb.String()
+}
+
+func (m Model) renderStarGraph(history []db.StarSnapshot, width, height int) string {
+	if len(history) == 0 {
+		return "\n\n  No star history snapshots found.\n  Press 'r' to refresh and query GitHub API."
+	}
+
+	var sb strings.Builder
+
+	// Reverse history to be chronological (left to right)
+	n := len(history)
+	reversed := make([]db.StarSnapshot, n)
+	for i := 0; i < n; i++ {
+		reversed[i] = history[n-1-i]
+	}
+
+	// We only show the last 30 snapshots to fit nicely in ASCII
+	if n > 30 {
+		reversed = reversed[n-30:]
+		n = 30
+	}
+
+	// Find min/max stars
+	minStars := reversed[0].Stars
+	maxStars := reversed[0].Stars
+	for _, s := range reversed {
+		if s.Stars < minStars {
+			minStars = s.Stars
+		}
+		if s.Stars > maxStars {
+			maxStars = s.Stars
+		}
+	}
+
+	// Graph dimensions
+	graphWidth := width - 10
+	if graphWidth < 10 {
+		graphWidth = 10
+	}
+	graphHeight := height - 5
+	if graphHeight < 4 {
+		graphHeight = 4
+	}
+
+	// Adjust min/max if they are equal to prevent division by zero
+	if minStars == maxStars {
+		minStars -= 10
+		maxStars += 10
+		if minStars < 0 {
+			minStars = 0
+		}
+	}
+
+	// Header
+	selectedRepo := ""
+	if len(m.repoTrackerFiltered) > 0 && m.repoTrackerCursor < len(m.repoTrackerFiltered) {
+		r := m.repoTrackerFiltered[m.repoTrackerCursor]
+		selectedRepo = fmt.Sprintf("%s/%s", r.Organization, r.Name)
+	}
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")).Render("Star Growth for: "+selectedRepo) + "\n\n")
+
+	// Render Y-axis and bars row by row (from top to bottom)
+	for r := graphHeight - 1; r >= 0; r-- {
+		// Y-axis ticks
+		if r == graphHeight-1 {
+			sb.WriteString(fmt.Sprintf("%6d ┤ ", maxStars))
+		} else if r == graphHeight/2 {
+			sb.WriteString(fmt.Sprintf("%6d ┤ ", minStars+(maxStars-minStars)/2))
+		} else if r == 0 {
+			sb.WriteString(fmt.Sprintf("%6d ┤ ", minStars))
+		} else {
+			sb.WriteString("       │ ")
+		}
+
+		// Draw columns
+		for i := 0; i < n; i++ {
+			s := reversed[i]
+			val := float64(s.Stars-minStars) / float64(maxStars-minStars) * float64(graphHeight-1)
+
+			f := val - float64(r)
+			if f >= 1.0 {
+				sb.WriteString("█")
+			} else if f <= 0.0 {
+				sb.WriteString(" ")
+			} else {
+				blocks := []string{" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+				idx := int(f * 8.0)
+				if idx < 0 {
+					idx = 0
+				}
+				if idx > 8 {
+					idx = 8
+				}
+				sb.WriteString(blocks[idx])
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// X-axis line
+	sb.WriteString("        └" + strings.Repeat("─", n) + "\n")
+
+	// X-axis dates
+	if n > 0 {
+		dateRow := make([]rune, n+4)
+		for i := range dateRow {
+			dateRow[i] = ' '
+		}
+
+		firstDate := reversed[0].SampledAt.Local().Format("01/02")
+		lastDate := reversed[n-1].SampledAt.Local().Format("01/02")
+
+		for idx, ch := range firstDate {
+			if idx < len(dateRow) {
+				dateRow[idx] = ch
+			}
+		}
+
+		lastStart := n - len(lastDate)
+		if lastStart > len(firstDate) {
+			for idx, ch := range lastDate {
+				if lastStart+idx < len(dateRow) {
+					dateRow[lastStart+idx] = ch
+				}
+			}
+		}
+
+		if n >= 15 {
+			midDate := reversed[n/2].SampledAt.Local().Format("01/02")
+			midStart := (n - len(midDate)) / 2
+			if midStart > len(firstDate) && midStart+len(midDate) < lastStart {
+				for idx, ch := range midDate {
+					dateRow[midStart+idx] = ch
+				}
+			}
+		}
+		sb.WriteString("         " + string(dateRow) + "\n\n")
+	}
+
+	// Growth delta summary
+	firstSnapshot := reversed[0]
+	lastSnapshot := reversed[n-1]
+	delta := lastSnapshot.Stars - firstSnapshot.Stars
+
+	durationStr := "over time"
+	days := int(lastSnapshot.SampledAt.Sub(firstSnapshot.SampledAt).Hours() / 24.0)
+	if days == 0 {
+		hours := int(lastSnapshot.SampledAt.Sub(firstSnapshot.SampledAt).Hours())
+		if hours == 0 {
+			mins := int(lastSnapshot.SampledAt.Sub(firstSnapshot.SampledAt).Minutes())
+			durationStr = fmt.Sprintf("in %d minutes", mins)
+		} else {
+			durationStr = fmt.Sprintf("in %d hours", hours)
+		}
+	} else if days == 1 {
+		durationStr = "in 1 day"
+	} else {
+		durationStr = fmt.Sprintf("in %d days", days)
+	}
+
+	if delta > 0 {
+		pct := (float64(delta) / float64(firstSnapshot.Stars)) * 100
+		growText := fmt.Sprintf("▲ +%d stars (+%.1f%%) %s", delta, pct, durationStr)
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true).Render(growText) + "\n")
+	} else if delta < 0 {
+		pct := (float64(delta) / float64(firstSnapshot.Stars)) * 100
+		shrinkText := fmt.Sprintf("▼ %d stars (%.1f%%) %s", delta, pct, durationStr)
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true).Render(shrinkText) + "\n")
+	} else {
+		sb.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("• No change in stars count "+durationStr) + "\n")
+	}
+
+	return sb.String()
 }
 

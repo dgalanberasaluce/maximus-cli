@@ -18,13 +18,15 @@ type UnstagedPackage struct {
 	Name string
 	// Kind is "brew", "cask", or "tap".
 	Kind string
+	// Version is the currently installed version. Empty for taps.
+	Version string
 }
 
 // Unstaged returns the packages installed on the system that are NOT listed in
-// the Brewfile. It uses `brew bundle cleanup` (without --force, which is the
-// default dry-run mode) and never returns an error just because there are
-// unstaged packages; an error is only returned for genuine failures (e.g.
-// brew not found, permission denied, Brewfile path wrong).
+// the Brewfile, enriched with their currently-installed version. It uses
+// `brew bundle cleanup` (without --force, which is the default dry-run mode)
+// and never returns an error just because there are unstaged packages; an
+// error is only returned for genuine failures (e.g. brew not found).
 func Unstaged(brewfilePath string) ([]UnstagedPackage, error) {
 	cmd := exec.Command("brew", "bundle", "cleanup", "--file", brewfilePath)
 	out, err := cmd.CombinedOutput()
@@ -39,23 +41,34 @@ func Unstaged(brewfilePath string) ([]UnstagedPackage, error) {
 		// exitErr just means "brew found packages to remove" — continue with
 		// the output we already captured.
 	}
-	return parseUnstagedOutput(out), nil
+	pkgs := parseUnstagedOutput(out)
+	// Enrich each package with its installed version.
+	for i, p := range pkgs {
+		if p.Kind == "tap" {
+			continue // taps have no version
+		}
+		ver, _ := InfoVersion(p.Name)
+		pkgs[i].Version = ver
+	}
+	return pkgs, nil
 }
 
 // parseUnstagedOutput converts the raw output of `brew bundle cleanup` into a
 // slice of UnstagedPackage.
 //
-// Actual brew output format:
+// brew prints package names in columnar/space-separated form within each
+// section, for example:
 //
 //	Would uninstall casks:
-//	iterm2
-//	visual-studio-code
+//	iterm2                     visual-studio-code
 //	Would uninstall formulae:
-//	bat
-//	fzf
+//	bat          fzf           gh
 //	Would untap:
 //	some/tap
 //	Run `brew bundle cleanup --force` to make these changes.
+//
+// Each body line may contain one or more package names separated by whitespace;
+// we split with strings.Fields so every token becomes its own entry.
 func parseUnstagedOutput(data []byte) []UnstagedPackage {
 	var pkgs []UnstagedPackage
 	var currentKind string
@@ -67,25 +80,36 @@ func parseUnstagedOutput(data []byte) []UnstagedPackage {
 			continue
 		}
 
-		// Detect section headers.
-		switch {
-		case strings.HasPrefix(line, "Would uninstall cask"):
-			currentKind = "cask"
-			continue
-		case strings.HasPrefix(line, "Would uninstall formula"):
-			currentKind = "brew"
-			continue
-		case strings.HasPrefix(line, "Would untap"):
-			currentKind = "tap"
+		// Detect section headers — these set the kind for following body lines.
+		// If we encounter a "Would " header that we don't care about (e.g.
+		// "Would `brew cleanup`:", "Would remove:"), we set currentKind to ""
+		// so we stop collecting.
+		if strings.HasPrefix(line, "Would ") {
+			switch {
+			case strings.HasPrefix(line, "Would uninstall cask"):
+				currentKind = "cask"
+			case strings.HasPrefix(line, "Would uninstall formula"):
+				currentKind = "brew"
+			case strings.HasPrefix(line, "Would untap"):
+				currentKind = "tap"
+			default:
+				currentKind = ""
+			}
 			continue
 		}
 
-		// Skip the trailing instruction line and any other non-package lines.
+		// Only collect package tokens once we are inside a known section.
+		// Lines before the first header (warnings, notes) are ignored, as are
+		// the trailing instruction line and any Error:/Warning: prefixed lines.
+		if currentKind == "" {
+			continue
+		}
 		if strings.HasPrefix(line, "Run `brew") ||
 			strings.HasPrefix(line, "Error:") ||
 			strings.HasPrefix(line, "Warning:") {
 			continue
 		}
+
 		pkgs = append(pkgs, UnstagedPackage{Name: line, Kind: currentKind})
 	}
 	return pkgs

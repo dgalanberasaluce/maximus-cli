@@ -166,8 +166,8 @@ func (m Model) renderUnstaged() string {
 	sb.WriteString("\n\n")
 
 	// Column header
-	sb.WriteString(fmt.Sprintf("  %-4s  %-10s  %s\n", "", "TYPE", "PACKAGE"))
-	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 50)) + "\n")
+	sb.WriteString(fmt.Sprintf("  %-4s  %-10s  %-28s  %s\n", "", "TYPE", "PACKAGE", "VERSION"))
+	sb.WriteString(helpStyle.Render("  "+strings.Repeat("─", 62)) + "\n")
 
 	// Calculate viewport for rows.
 	const chromeHeight = 12
@@ -197,7 +197,11 @@ func (m Model) renderUnstaged() string {
 		if m.unstagedSelected[i] {
 			checked = "[✓]"
 		}
-		row := fmt.Sprintf("  %-4s  %-10s  %s", checked, "["+p.Kind+"]", p.Name)
+		ver := p.Version
+		if ver == "" {
+			ver = "—"
+		}
+		row := fmt.Sprintf("  %-4s  %-10s  %-28s  %s", checked, "["+p.Kind+"]", truncate(p.Name, 28), ver)
 		if i == m.unstagedCursor {
 			row = lipgloss.NewStyle().
 				Bold(true).

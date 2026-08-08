@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.1.1
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
-	github.com/mattn/go-sqlite3 v1.14.47
+	github.com/mattn/go-sqlite3 v1.14.49
 )
 
 require (
